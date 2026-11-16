@@ -1,0 +1,6 @@
+{
+  "name": "Slind AI - Video Creation Platform",
+  "description": "AI Video Creation platform with auto script generation, voiceover narration, animated typography, device mockups, and dynamic video rendering.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
