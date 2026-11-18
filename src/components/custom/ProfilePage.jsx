@@ -22,7 +22,7 @@ const TOPUP_PRESETS = [500, 1000, 3000, 10000, 50000];
 const TOPUP_MIN = 500;
 const TOPUP_MAX = 50000;
 
-const TopUpPopup = ({ user, onClose }) => {
+const TopUpPopup = ({ user, onClose, sheetRef, swipe }) => {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const inputRef = useRef(null);
@@ -31,15 +31,8 @@ const TopUpPopup = ({ user, onClose }) => {
   const tooLow = value !== "" && n < TOPUP_MIN;
   const tooHigh = n > TOPUP_MAX;
 
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   const onInput = (e) => {
-    const digits = e.target.value.replace(/[^0-9]/g, "").replace(/^0+/, "").slice(0, 6);
-    setValue(digits);
+    setValue(e.target.value.replace(/[^0-9]/g, "").replace(/^0+/, "").slice(0, 6));
   };
 
   const onContinue = async () => {
@@ -55,19 +48,18 @@ const TopUpPopup = ({ user, onClose }) => {
     }
   };
 
+  // Same bottom-sheet popup as Language / "Are you sure?" on this page
   return (
-    <div className="topup-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }} data-testid="topup-popup">
-      <div className="topup-popup" role="dialog" aria-label="Top Up credits">
-        <div className="topup-header">
-          <h3 className="topup-title">Top Up</h3>
-          <button type="button" className="topup-close" onClick={onClose} aria-label="Close"><X className="w-5 h-5" /></button>
-        </div>
+    <div className="popup-overlay" onClick={onClose} data-testid="topup-popup">
+      <div className="confirm-popup topup-sheet" ref={sheetRef} onClick={(e) => e.stopPropagation()} {...swipe}>
+        <div className="popup-handle" />
+        <h3 className="confirm-popup-title">Top Up</h3>
         <div className="topup-tabs" data-testid="topup-tabs">
           {TOPUP_PRESETS.map((p) => (
             <button
               key={p}
               type="button"
-              className={`topup-tab ${n === p ? "active" : ""}`}
+              className={`topup-tab ${n === p ? "confirm-btn-back" : "confirm-btn-yes"}`}
               onClick={() => { setValue(String(p)); inputRef.current?.focus(); }}
               data-testid={`topup-tab-${p}`}
             >
@@ -75,27 +67,39 @@ const TopUpPopup = ({ user, onClose }) => {
             </button>
           ))}
         </div>
-        <div className={`topup-input-wrap ${tooLow || tooHigh ? "invalid" : ""}`}>
-          {value !== "" && <CreditsIcon className="topup-input-icon" color="#FFFFFF" />}
+        {/* input: same style as the email field on the sign-in page */}
+        <div className={`w-full h-14 rounded-[20px] px-5 flex items-center gap-2 transition-colors duration-200 ${
+          value.length > 0 ? 'bg-[#2E2F33]' : 'bg-[#1C1C1E] focus-within:bg-[#2E2F33]'
+        } ${tooLow || tooHigh ? 'ring-1 ring-[#FF453A]' : ''}`}>
+          {value !== "" && <CreditsIcon className="w-[18px] h-[18px] flex-shrink-0" color="#FFFFFF" />}
           <input
             ref={inputRef}
-            className="topup-input"
             inputMode="numeric"
             pattern="[0-9]*"
             placeholder="Number of credits to purchase"
             value={value}
             onChange={onInput}
             onKeyDown={(e) => { if (e.key === "Enter") onContinue(); }}
+            className="w-full bg-transparent text-white text-[16px] placeholder:text-zinc-500 border-none outline-none focus:outline-none focus:ring-0"
             data-testid="topup-input"
           />
         </div>
-        <p className={`topup-hint ${tooLow || tooHigh ? "error" : ""}`}>
+        <p className={`text-[13px] mt-2 mb-5 px-1 ${tooLow || tooHigh ? 'text-[#FF453A]' : 'text-zinc-500'}`}>
           {tooLow ? `Minimum ${TOPUP_MIN} credits` : tooHigh ? `Maximum ${TOPUP_MAX} credits` : `From ${TOPUP_MIN} to ${TOPUP_MAX} credits`}
         </p>
-        <button type="button" className="topup-continue" disabled={!valid || busy} onClick={onContinue} data-testid="topup-continue">
+        {/* button: same style as "Continue" on the sign-in page */}
+        <button
+          type="button"
+          disabled={!valid || busy}
+          onClick={onContinue}
+          className={`w-full h-14 rounded-full font-semibold text-[16px] flex items-center justify-center transition-all ${
+            valid && !busy ? 'bg-white text-black hover:bg-zinc-200 cursor-pointer shadow-md active:scale-[0.99]' : 'bg-[#2C2C2E] text-zinc-500 cursor-not-allowed'
+          }`}
+          data-testid="topup-continue"
+        >
           {busy ? "Please wait…" : "Continue"}
         </button>
-        <p className="topup-subtext">You’ll be redirected to a payment provider</p>
+        <p className="text-[12px] text-zinc-500 text-center mt-3">You’ll be redirected to a payment provider</p>
       </div>
     </div>
   );
@@ -210,6 +214,8 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
 
   const closeLanguage = () => animateClose(languagePopupRef.current, () => setShowLanguagePopup(false));
   const closeConfirm = () => animateClose(confirmPopupRef.current, () => setShowConfirmPopup(null));
+  const topUpPopupRef = useRef(null);
+  const closeTopUp = () => animateClose(topUpPopupRef.current, () => setShowTopUp(false));
 
   // Translation helper
   const t = (key) => getTranslation(selectedLanguage, key);
@@ -405,7 +411,6 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
   if (activeView === 'main') {
     return (
       <div className="profile-page-v2" data-testid="profile-page">
-        {showTopUp && <TopUpPopup user={user} onClose={() => setShowTopUp(false)} />}
         {/* Header */}
         <div className="profile-v2-header">
           <button 
@@ -605,6 +610,11 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
               </div>
             </div>
           </div>
+        )}
+
+        {/* Top Up Popup */}
+        {showTopUp && (
+          <TopUpPopup user={user} onClose={closeTopUp} sheetRef={topUpPopupRef} swipe={bindSwipe(topUpPopupRef, () => setShowTopUp(false))} />
         )}
 
         {/* Confirm Popup */}
