@@ -7,7 +7,9 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import https from 'https';
 import dotenv from 'dotenv';
-import { runVideoPipeline, newCostTracker, CostTracker } from './videoPipeline';
+import { runVideoPipeline, newCostTracker, CostTracker, levelCfg, normLevel, Level } from './videoPipeline';
+import { applyCreatedEdit, runSourceEdit, applySourceEdit, SourceState } from './editEngine';
+import { CaptionStyle } from './captionStyle';
 
 dotenv.config();
 
@@ -60,6 +62,13 @@ interface Project {
   credits_charged?: number;
   credits_reserved?: number;
   cost_breakdown?: any[];
+  level?: Level;
+  style?: CaptionStyle;
+  kind?: 'create' | 'source';
+  source_state?: SourceState;
+  edit_notes?: string[];
+  edit_summary?: string;
+  voice?: string;
 }
 
 interface User {
@@ -73,6 +82,8 @@ interface User {
   role: string;
   credits: number;
   created_at: string;
+  plan?: string;
+  subscription_status?: string;
 }
 
 interface Database {
@@ -137,9 +148,16 @@ app.use('/assets', express.static(path.resolve(__dirname, 'public/assets')));
 // $0.01 of real OpenRouter API cost = 1 credit. Real cost is summed per video
 // (usage.cost from every OpenRouter response) and charged when the job finishes.
 const USD_PER_CREDIT = 0.01;
-const MIN_GENERATION_CREDITS = Number(process.env.MIN_GENERATION_CREDITS || 25); // must hold at least this to start
-const MIN_EDIT_CREDITS = Number(process.env.MIN_EDIT_CREDITS || 10);
-const DEFAULT_SIGNUP_CREDITS = 100;
+const MIN_GENERATION_CREDITS = Number(process.env.MIN_GENERATION_CREDITS || 10); // must hold at least this to start
+const MIN_EDIT_CREDITS = Number(process.env.MIN_EDIT_CREDITS || 3);
+const DEFAULT_SIGNUP_CREDITS = Number(process.env.WELCOME_CREDITS || 20);
+const MIN_TOPUP = 500;
+const MAX_TOPUP = 50000;
+
+/** The job's spending limit: never more than the user's available balance (and the level's cap). */
+function budgetFor(available: number, capUsd: number) {
+  return Math.max(0.01, Math.min(available * USD_PER_CREDIT, capUsd));
+}
 
 function getOrCreateUser(userId?: string): User | undefined {
   if (!userId) return undefined;
@@ -181,12 +199,12 @@ function chargeProject(project: Project, cost: CostTracker) {
 }
 
 // Video Generation Worker
-async function processVideoGeneration(projectId: string, isModification = false, modificationPrompt = '') {
+async function processVideoGeneration(projectId: string, isModification = false, modificationPrompt = '', budgetUsd?: number, editAttachments: string[] = []) {
   const project = db.projects[projectId];
   if (!project) return;
   const workDir = path.join(UPLOADS_DIR, `work_${projectId}`);
   if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true });
-  const cost = newCostTracker();
+  const cost = newCostTracker(budgetUsd);
 
   const updateProgress = (pct: number, msg: string) => {
     project.progress = Math.min(99, pct);
@@ -198,45 +216,82 @@ async function processVideoGeneration(projectId: string, isModification = false,
 
   try {
     const lang = project.language || 'auto';
-    const finalVideoName = `video_${projectId}${isModification ? '_' + Date.now() : ''}.mp4`;
-    const posterName = `poster_${projectId}${isModification ? '_' + Date.now() : ''}.jpg`;
+    const ru = String(lang).toLowerCase().startsWith('ru');
+    const stamp = isModification ? '_' + Date.now() : '';
+    const finalVideoName = `video_${projectId}${stamp}.mp4`;
+    const posterName = `poster_${projectId}${stamp}.jpg`;
+    const outVideo = path.join(UPLOADS_DIR, finalVideoName);
+    const outPoster = path.join(UPLOADS_DIR, posterName);
+    const toLocal = (u: string) => path.resolve(__dirname, u.replace(/^https?:\/\/[^/]+/, '').replace(/^\/api\//, '').replace(/^\//, ''));
     const attached = (project.product_images || [])
       .filter((u) => typeof u === 'string')
-      .map((u) => path.resolve(__dirname, u.replace(/^\/api\//, '').replace(/^\//, '')))
+      .map(toLocal)
       .filter((p) => p.startsWith(UPLOADS_DIR) && fs.existsSync(p));
+    let audioFile = '';
 
-    const result = await runVideoPipeline({
-      projectId,
-      prompt: modificationPrompt || project.prompt,
-      language: lang,
-      format: project.format_id || 'auto',
-      workDir,
-      outVideo: path.join(UPLOADS_DIR, finalVideoName),
-      outPoster: path.join(UPLOADS_DIR, posterName),
-      voice: (project as any).voice,
-      attachedImages: attached,
-      previous: isModification && project.scenes?.length
-        ? { scenes: project.scenes as any, full_script: project.full_script || '', words: project.words }
-        : undefined,
-      onProgress: updateProgress,
-      cost,
-    });
+    if (project.kind === 'source' && !isModification) {
+      // user's own footage: real editing on top of it
+      const src = project.source_video_url ? toLocal(project.source_video_url) : '';
+      if (!src || !src.startsWith(UPLOADS_DIR) || !fs.existsSync(src)) throw new Error('Uploaded video not found — please upload it again.');
+      const r = await runSourceEdit({ sourceFile: src, prompt: project.prompt, level: project.level, style: project.style, voice: project.voice, workDir, outVideo, outPoster, cost, onProgress: updateProgress, ru });
+      project.source_state = r.state;
+      project.style = r.state.style;
+      project.words = r.state.words;
+      project.title = r.title;
+      project.edit_notes = r.notes;
+      audioFile = r.state.audio;
+    } else if (project.kind === 'source' && isModification && project.source_state) {
+      const r = await applySourceEdit({ state: project.source_state, request: modificationPrompt, workDir, outVideo, outPoster, cost, onProgress: updateProgress, ru, voice: project.voice });
+      project.source_state = r.state;
+      project.style = r.state.style;
+      project.edit_notes = r.notes;
+      project.edit_summary = r.summary;
+      audioFile = r.state.translated?.dubAudio || r.state.audio;
+    } else if (isModification && project.scenes?.length) {
+      // structured edit: only the requested change, existing assets/voice/timings reused
+      const r = await applyCreatedEdit({
+        project: { scenes: project.scenes as any, words: project.words || [], full_script: project.full_script || '', style: project.style, level: project.level, voice: project.voice, language: lang, format_id: project.format_id, prompt: project.prompt },
+        request: modificationPrompt, attachments: editAttachments, workDir, outVideo, outPoster, cost, onProgress: updateProgress, ru,
+      });
+      project.scenes = r.scenes;
+      project.words = r.words;
+      project.full_script = r.full_script;
+      project.style = r.style;
+      if ((r as any).voice) project.voice = (r as any).voice;
+      project.edit_notes = r.notes;
+      project.edit_summary = r.summary;
+      audioFile = r.audioFile;
+    } else {
+      const result = await runVideoPipeline({
+        projectId,
+        prompt: project.prompt,
+        language: lang,
+        format: project.format_id || 'auto',
+        workDir, outVideo, outPoster,
+        voice: project.voice,
+        level: project.level,
+        style: project.style,
+        attachedImages: attached,
+        onProgress: updateProgress,
+        cost,
+      });
+      project.scenes = result.scenes;
+      project.full_script = result.full_script;
+      project.words = result.words;
+      project.title = result.title;
+      audioFile = result.audioFile;
+    }
 
-    project.scenes = result.scenes;
-    project.full_script = result.full_script;
-    project.words = result.words;
-    project.title = result.title;
     project.video_url = `/api/uploads/${finalVideoName}`;
     project.poster_url = `/api/uploads/${posterName}`;
     const voiceName = `voiceover_${projectId}.mp3`;
-    try { fs.copyFileSync(result.audioFile, path.join(UPLOADS_DIR, voiceName)); } catch (_) {}
-    project.audio_url = `/api/uploads/${voiceName}`;
+    try { if (audioFile) { fs.copyFileSync(audioFile, path.join(UPLOADS_DIR, voiceName)); project.audio_url = `/api/uploads/${voiceName}`; } } catch (_) {}
     project.error = undefined;
     project.error_message = undefined;
     chargeProject(project, cost);
     project.progress = 100;
     project.status = 'completed';
-    project.progress_message = String(lang).startsWith('ru') ? 'Готово!' : 'Ready!';
+    project.progress_message = ru ? 'Готово!' : 'Ready!';
     project.completed_at = new Date().toISOString();
     project.updated_at = project.completed_at;
     saveDb();
@@ -244,9 +299,17 @@ async function processVideoGeneration(projectId: string, isModification = false,
     console.error(`Error in video generation for ${projectId}:`, err);
     // API money already spent is still charged (real cost only)
     chargeProject(project, cost);
-    project.status = 'failed';
-    project.error = err.message || String(err);
-    project.error_message = `Generation failed: ${err.message || String(err)}`;
+    if (isModification && project.video_url) {
+      // a failed edit keeps the previous, working video
+      project.status = 'completed';
+      project.progress = 100;
+      project.edit_notes = [`Edit failed: ${err.message || String(err)}`];
+      project.error_message = `Edit failed: ${err.message || String(err)}`;
+    } else {
+      project.status = 'failed';
+      project.error = err.message || String(err);
+      project.error_message = `Generation failed: ${err.message || String(err)}`;
+    }
     saveDb();
   }
 }
@@ -270,7 +333,7 @@ app.post('/api/auth/session', (req: Request, res: Response) => {
     name: 'Guest Creator',
     avatar: '/assets/profile-icon.png',
     role: 'creator',
-    credits: 100,
+    credits: DEFAULT_SIGNUP_CREDITS,
     created_at: new Date().toISOString(),
   };
 
@@ -307,7 +370,7 @@ app.get('/api/auth/me', (req: Request, res: Response) => {
       name: 'Slind Creator',
       avatar: '/assets/profile-icon.png',
       role: 'creator',
-      credits: 100,
+      credits: DEFAULT_SIGNUP_CREDITS,
       created_at: new Date().toISOString(),
     };
     db.users[defaultId] = user;
@@ -370,7 +433,7 @@ app.post('/api/auth/verify-code', (req: Request, res: Response) => {
       name: normalized.split('@')[0] || 'Creator',
       avatar: '/assets/profile-icon.png',
       role: 'creator',
-      credits: 100,
+      credits: DEFAULT_SIGNUP_CREDITS,
       created_at: new Date().toISOString(),
     };
     db.users[userId] = user;
@@ -396,7 +459,7 @@ app.post('/api/auth/register', (req: Request, res: Response) => {
     name: name || username || 'Creator',
     avatar: '/assets/profile-icon.png',
     role: 'creator',
-    credits: 100,
+    credits: DEFAULT_SIGNUP_CREDITS,
     created_at: new Date().toISOString(),
   };
 
@@ -424,7 +487,7 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
       name: email?.split('@')[0] || 'Creator',
       avatar: '/assets/profile-icon.png',
       role: 'creator',
-      credits: 100,
+      credits: DEFAULT_SIGNUP_CREDITS,
       created_at: new Date().toISOString(),
     };
     db.users[userId] = user;
@@ -525,7 +588,12 @@ app.post('/api/video/generate', (req: Request, res: Response) => {
     product_images,
     subtitle_style = 'style_a',
     user_id,
+    level: rawLevel,
+    voice,
+    style,
   } = req.body;
+  const level = normLevel(rawLevel);
+  const cfg = levelCfg(level);
 
   if (!prompt || typeof prompt !== 'string') {
     return res.status(400).json({ error: 'Prompt is required' });
@@ -551,10 +619,15 @@ app.post('/api/video/generate', (req: Request, res: Response) => {
   }
 
   const projectId = `proj_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+  const budgetUsd = budgetFor(available, cfg.capUsd);
   const newProject: Project = {
     id: projectId,
     user_id: targetUser.user_id,
-    credits_reserved: MIN_GENERATION_CREDITS,
+    credits_reserved: Math.ceil(budgetUsd / USD_PER_CREDIT),
+    level,
+    voice: typeof voice === 'string' ? voice : undefined,
+    style: style && typeof style === 'object' ? style : undefined,
+    kind: source_video_url ? 'source' : 'create',
     prompt,
     format_id,
     language,
@@ -574,7 +647,7 @@ app.post('/api/video/generate', (req: Request, res: Response) => {
 
   // Run generation in background
   setTimeout(() => {
-    processVideoGeneration(projectId);
+    processVideoGeneration(projectId, false, '', budgetUsd);
   }, 100);
 
   res.json({
@@ -611,6 +684,7 @@ app.post('/api/video/:id/modify', (req: Request, res: Response) => {
   const isRussian = String(original.language || 'en').toLowerCase().startsWith('ru');
 
   // Edits are charged by real API cost too ($0.01 = 1 credit) when they finish.
+  let editBudget = 0.3;
   const ownerId = original.user_id || (req.headers['x-user-id'] as string);
   const targetUser = getOrCreateUser(ownerId);
   if (targetUser) {
@@ -629,7 +703,8 @@ app.post('/api/video/:id/modify', (req: Request, res: Response) => {
       });
     }
     original.user_id = targetUser.user_id;
-    original.credits_reserved = MIN_EDIT_CREDITS;
+    original.credits_reserved = Math.min(available, 100);
+    editBudget = budgetFor(available, 1.0);
   }
 
   original.prompt = newPrompt;
@@ -639,17 +714,19 @@ app.post('/api/video/:id/modify', (req: Request, res: Response) => {
   original.modified_from = original.id;
   original.updated_at = new Date().toISOString();
 
+  let editFiles: string[] = [];
   if (Array.isArray(attachments) && attachments.length > 0) {
-    const urls = attachments.map((a: any) => a.uploadedUrl || a.url || a.preview).filter(Boolean);
-    if (urls.length > 0) {
-      original.product_images = urls;
-    }
+    const urls = attachments.map((a: any) => (typeof a === 'string' ? a : a.uploadedUrl || a.url)).filter((u: any) => typeof u === 'string' && !u.startsWith('blob:'));
+    editFiles = urls.map((u: string) => path.resolve(__dirname, u.replace(/^https?:\/\/[^/]+/, '').replace(/^\/api\//, '').replace(/^\//, '')))
+      .filter((p: string) => p.startsWith(UPLOADS_DIR) && fs.existsSync(p) && /\.(png|jpe?g|webp|heic)$/i.test(p));
   }
+  original.edit_notes = undefined;
+  original.error_message = undefined;
 
   saveDb();
 
   setTimeout(() => {
-    processVideoGeneration(original.id, true, newPrompt);
+    processVideoGeneration(original.id, true, newPrompt, editBudget, editFiles);
   }, 100);
 
   res.json({
@@ -759,13 +836,11 @@ app.post('/api/upload/complete', (req: Request, res: Response) => {
       } catch (_) {}
     }
   }
-  writeStream.end();
-
   delete db.chunk_uploads[uploadId];
   saveDb();
 
   const fileUrl = `/api/uploads/${finalName}`;
-  res.json({ url: fileUrl, file_url: fileUrl });
+  writeStream.end(() => res.json({ url: fileUrl, file_url: fileUrl }));
 });
 
 // Device Mockup Creation
@@ -879,7 +954,7 @@ app.get('/api/subscription/plans', (_req: Request, res: Response) => {
         id: 'free',
         name: 'Free',
         price: 0,
-        credits: 100,
+        credits: DEFAULT_SIGNUP_CREDITS,
         features: ['1080p Export', 'Basic AI formats', 'Standard queue'],
       },
       {
@@ -901,6 +976,28 @@ app.get('/api/subscription/status/:sessionId', (req: Request, res: Response) => 
   res.json({ status: 'active', plan: 'pro' });
 });
 
+// Credit top-up (subscribers only). Creates a payment-provider checkout.
+app.post('/api/topup', (req: Request, res: Response) => {
+  const userId = (req.body?.user_id || req.headers['x-user-id']) as string;
+  const user = userId ? db.users[userId] : undefined;
+  if (!user) return res.status(401).json({ error: 'Not signed in' });
+  const credits = Math.floor(Number(req.body?.credits));
+  if (!isFinite(credits) || credits < MIN_TOPUP || credits > MAX_TOPUP) {
+    return res.status(400).json({ error: 'invalid_amount', message: `Enter between ${MIN_TOPUP} and ${MAX_TOPUP} credits.` });
+  }
+  const active = user.subscription_status === 'active' || (!!user.plan && user.plan !== 'free');
+  if (!active) return res.status(403).json({ error: 'subscription_required', message: 'Top-ups are available with an active subscription.' });
+  // TODO(whop): create a Whop checkout session for `credits` (price per credit from the plan),
+  // pass metadata { user_id, credits }, return its purchase URL here, and credit the balance
+  // from the Whop `payment.succeeded` webhook (never from this endpoint).
+  const checkoutUrl = process.env.WHOP_TOPUP_CHECKOUT_URL || '';
+  if (!checkoutUrl) return res.status(501).json({ error: 'payments_not_configured', message: 'Payments are being set up. Please try again soon.', credits });
+  const url = new URL(checkoutUrl);
+  url.searchParams.set('metadata[user_id]', user.user_id);
+  url.searchParams.set('metadata[credits]', String(credits));
+  res.json({ checkout_url: url.toString(), credits });
+});
+
 // User Management & Settings
 app.put('/api/users/:userId', (req: Request, res: Response) => {
   const userId = req.params.userId;
@@ -913,12 +1010,14 @@ app.put('/api/users/:userId', (req: Request, res: Response) => {
       email: req.body.email || 'user@slind.ai',
       name: req.body.name || 'Creator',
       role: 'creator',
-      credits: 100,
+      credits: DEFAULT_SIGNUP_CREDITS,
       created_at: new Date().toISOString(),
     };
     db.users[userId] = user;
   }
-  Object.assign(user, req.body);
+  // never let the client set its own balance / plan
+  const { credits: _c, plan: _p, subscription_status: _s, role: _r, user_id: _u, id: _i, ...safe } = req.body || {};
+  Object.assign(user, safe);
   saveDb();
   res.json({ user });
 });

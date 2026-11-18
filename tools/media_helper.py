@@ -5,6 +5,8 @@ Subcommands:
   align  <audio> <script.txt> <out.json> [lang]   word-level timestamps (faster-whisper) aligned to the script text
   rembg  <in.png> <out.png>                      remove background -> transparent PNG, trimmed
   ass    <spec.json> <out.ass>                    build ASS subtitles (word-synced captions + headline captions)
+  transcribe <media> <out.json> [lang]            word-level transcript of any audio/video (faster-whisper)
+  card   <in> <out.png> <w> <h> <radius> [border]  photo card (cover-crop, rounded corners, white border) -> PNG
 """
 import json, os, re, sys, difflib
 
@@ -110,16 +112,51 @@ def esc(t):
     return t.replace('\\', '\\\\').replace('{', '(').replace('}', ')').replace('\n', ' ')
 
 
+def _hex(h):
+    h = str(h or '#FFFFFF').strip().lstrip('#')
+    if len(h) == 3:
+        h = ''.join(c * 2 for c in h)
+    try:
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    except Exception:
+        return (255, 255, 255)
+
+
+def _lum(rgb):
+    r, g, b = [x / 255.0 for x in rgb]
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def _ass(rgb, alpha=0):
+    r, g, b = rgb
+    return f"&H{alpha:02X}{b:02X}{g:02X}{r:02X}"
+
+
 def cmd_ass(spec_path, out_path):
     spec = json.load(open(spec_path, encoding='utf-8'))
     W, H = spec.get('width', 720), spec.get('height', 1280)
     words = spec['words']
     total = spec.get('duration', words[-1]['end'] + 0.5 if words else 1)
     headlines = spec.get('headlines', [])  # [{start_idx, end_idx, highlight_idx}]
-    sub_fs = spec.get('sub_font_size', 62)
-    hl_fs = spec.get('headline_font_size', 104)
-    m_bold = Measurer(os.path.join(FONT_DIR, 'Inter-Bold.ttf'))
-    m_xb = Measurer(os.path.join(FONT_DIR, 'Inter-ExtraBold.ttf'))
+    st = spec.get('style') or {}
+    sub_fs = int(spec.get('sub_font_size', 62) * float(st.get('sub_scale', 1.0)))
+    hl_fs = int(spec.get('headline_font_size', 104) * float(st.get('head_scale', 1.0)))
+    sub_file = st.get('sub_font_file') or os.path.join(FONT_DIR, 'Inter-Bold.ttf')
+    head_file = st.get('head_font_file') or os.path.join(FONT_DIR, 'Inter-ExtraBold.ttf')
+    sub_fam = st.get('sub_font_family') or 'Inter'
+    head_fam = st.get('head_font_family') or 'Inter ExtraBold'
+    sub_b = '-1' if st.get('sub_bold', True) else '0'
+    head_b = '-1' if st.get('head_bold', True) else '0'
+    hi_rgb = _hex(st.get('highlight_color') or '#FFFFFF')
+    hi_txt = _hex(st.get('highlight_text_color')) if st.get('highlight_text_color') else ((20, 20, 20) if _lum(hi_rgb) > 0.6 else (255, 255, 255))
+    sub_rgb = _hex(st.get('subtitle_color') or '#FFFFFF')
+    head_rgb = _hex(st.get('headline_color') or '#FFFFFF')
+    show_subs = st.get('subtitles', True) is not False
+    show_heads = st.get('headlines', True) is not False
+    if not show_heads:
+        headlines = []
+    m_bold = Measurer(sub_file)
+    m_xb = Measurer(head_file)
 
     head = f"""[Script Info]
 ScriptType: v4.00+
@@ -130,11 +167,11 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Sub,Inter,{sub_fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,20,20,20,1
-Style: SubShadow,Inter,{sub_fs},&H90000000,&H90000000,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,20,20,20,1
-Style: Head,Inter ExtraBold,{hl_fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,20,20,20,1
-Style: HeadShadow,Inter ExtraBold,{hl_fs},&H90000000,&H90000000,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,20,20,20,1
-Style: HeadBox,Inter ExtraBold,{hl_fs},&H00141414,&H00141414,&H00FFFFFF,&H00000000,-1,0,0,0,100,100,0,0,3,12,0,5,20,20,20,1
+Style: Sub,{sub_fam},{sub_fs},{_ass(sub_rgb)},{_ass(sub_rgb)},&H00000000,&H00000000,{sub_b},0,0,0,100,100,0,0,1,0,0,5,20,20,20,1
+Style: SubShadow,{sub_fam},{sub_fs},&H90000000,&H90000000,&H00000000,&H00000000,{sub_b},0,0,0,100,100,0,0,1,0,0,5,20,20,20,1
+Style: Head,{head_fam},{hl_fs},{_ass(head_rgb)},{_ass(head_rgb)},&H00000000,&H00000000,{head_b},0,0,0,100,100,0,0,1,0,0,5,20,20,20,1
+Style: HeadShadow,{head_fam},{hl_fs},&H90000000,&H90000000,&H00000000,&H00000000,{head_b},0,0,0,100,100,0,0,1,0,0,5,20,20,20,1
+Style: HeadBox,{head_fam},{hl_fs},{_ass(hi_txt)},{_ass(hi_txt)},{_ass(hi_rgb)},&H00000000,{head_b},0,0,0,100,100,0,0,3,12,0,5,20,20,20,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -172,7 +209,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if cur: chunks.append(cur)
     starts = [c[0]['start'] for c in chunks]
     head_starts = sorted(words[h['start_idx']]['start'] for h in headlines if 0 <= h['start_idx'] < len(words))
-    for ci, c in enumerate(chunks):
+    for ci, c in enumerate(chunks if show_subs else []):
         t0 = c[0]['start']
         nxt = [s for s in starts[ci + 1:ci + 2]] + [s for s in head_starts if s > t0]
         t1 = min([c[-1]['end'] + 0.35] + nxt + [total])
@@ -229,6 +266,55 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     print(json.dumps({'ok': True, 'events': len(ev), 'chunks': len(chunks), 'headlines': len(headlines)}))
 
 
+# ----------------------------------------------------------------- transcribe
+def cmd_transcribe(media, out_path, lang=None):
+    from faster_whisper import WhisperModel
+    import subprocess, numpy as np
+    pcm = subprocess.run(['ffmpeg', '-v', 'error', '-i', media, '-vn', '-f', 's16le', '-ac', '1', '-ar', '16000', '-'],
+                         capture_output=True).stdout
+    words, segs_out, language = [], [], None
+    if len(pcm) > 32000:
+        samples = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
+        model = WhisperModel(os.environ.get('WHISPER_MODEL', 'base'), device='cpu', compute_type='int8')
+        segs, info = model.transcribe(samples, word_timestamps=True, language=(lang or None), vad_filter=True, beam_size=5)
+        language = info.language
+        for s in segs:
+            seg_words = []
+            for w in (s.words or []):
+                t = w.word.strip()
+                if not t:
+                    continue
+                seg_words.append(len(words))
+                words.append({'w': t, 'start': round(float(w.start), 3), 'end': round(float(w.end), 3), 'p': round(float(w.probability or 0), 3)})
+            if seg_words:
+                segs_out.append({'text': s.text.strip(), 'start': round(float(s.start), 3), 'end': round(float(s.end), 3),
+                                 'from': seg_words[0], 'to': seg_words[-1]})
+    # very low confidence => treat as no speech (music only)
+    if words and sum(w['p'] for w in words) / len(words) < 0.35:
+        words, segs_out = [], []
+    json.dump({'words': words, 'segments': segs_out, 'language': language}, open(out_path, 'w', encoding='utf-8'), ensure_ascii=False)
+    print(json.dumps({'ok': True, 'words': len(words), 'language': language}))
+
+
+# ----------------------------------------------------------------- card
+def cmd_card(inp, out, w, h, radius, border='6'):
+    from PIL import Image, ImageDraw, ImageOps
+    w, h, radius, border = int(w), int(h), int(radius), int(border)
+    im = Image.open(inp).convert('RGB')
+    im = ImageOps.fit(im, (w, h), method=Image.LANCZOS)
+    W2, H2 = w + 2 * border, h + 2 * border
+    canvas = Image.new('RGBA', (W2, H2), (0, 0, 0, 0))
+    mask_outer = Image.new('L', (W2, H2), 0)
+    ImageDraw.Draw(mask_outer).rounded_rectangle([0, 0, W2 - 1, H2 - 1], radius=radius + border if radius else 0, fill=255)
+    white = Image.new('RGBA', (W2, H2), (255, 255, 255, 255))
+    canvas.paste(white, (0, 0), mask_outer)
+    mask_in = Image.new('L', (w, h), 0)
+    ImageDraw.Draw(mask_in).rounded_rectangle([0, 0, w - 1, h - 1], radius=radius, fill=255)
+    canvas.paste(im, (border, border), mask_in)
+    canvas.save(out)
+    print(json.dumps({'ok': True, 'size': [W2, H2]}))
+
+
 if __name__ == '__main__':
     c = sys.argv[1]
     if c == 'align':
@@ -237,5 +323,9 @@ if __name__ == '__main__':
         cmd_rembg(*sys.argv[2:])
     elif c == 'ass':
         cmd_ass(*sys.argv[2:])
+    elif c == 'transcribe':
+        cmd_transcribe(*sys.argv[2:])
+    elif c == 'card':
+        cmd_card(*sys.argv[2:])
     else:
         sys.exit('unknown command')

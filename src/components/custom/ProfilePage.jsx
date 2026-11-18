@@ -17,6 +17,90 @@ const CreditsIcon = ({ className, color = "currentColor" }) => (
   </svg>
 );
 
+// ---------------- Top Up popup (subscribers only) ----------------
+const TOPUP_PRESETS = [500, 1000, 3000, 10000, 50000];
+const TOPUP_MIN = 500;
+const TOPUP_MAX = 50000;
+
+const TopUpPopup = ({ user, onClose }) => {
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
+  const n = Number(value);
+  const valid = value !== "" && Number.isInteger(n) && n >= TOPUP_MIN && n <= TOPUP_MAX;
+  const tooLow = value !== "" && n < TOPUP_MIN;
+  const tooHigh = n > TOPUP_MAX;
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const onInput = (e) => {
+    const digits = e.target.value.replace(/[^0-9]/g, "").replace(/^0+/, "").slice(0, 6);
+    setValue(digits);
+  };
+
+  const onContinue = async () => {
+    if (!valid || busy) return;
+    setBusy(true);
+    try {
+      const r = await axios.post(`${API}/topup`, { user_id: user?.user_id || user?.id, credits: n });
+      if (r.data?.checkout_url) window.location.href = r.data.checkout_url;
+    } catch (err) {
+      toast.error(err?.response?.data?.message || "Could not start the payment. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="topup-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }} data-testid="topup-popup">
+      <div className="topup-popup" role="dialog" aria-label="Top Up credits">
+        <div className="topup-header">
+          <h3 className="topup-title">Top Up</h3>
+          <button type="button" className="topup-close" onClick={onClose} aria-label="Close"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="topup-tabs" data-testid="topup-tabs">
+          {TOPUP_PRESETS.map((p) => (
+            <button
+              key={p}
+              type="button"
+              className={`topup-tab ${n === p ? "active" : ""}`}
+              onClick={() => { setValue(String(p)); inputRef.current?.focus(); }}
+              data-testid={`topup-tab-${p}`}
+            >
+              +{p}
+            </button>
+          ))}
+        </div>
+        <div className={`topup-input-wrap ${tooLow || tooHigh ? "invalid" : ""}`}>
+          {value !== "" && <CreditsIcon className="topup-input-icon" color="#FFFFFF" />}
+          <input
+            ref={inputRef}
+            className="topup-input"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            placeholder="Number of credits to purchase"
+            value={value}
+            onChange={onInput}
+            onKeyDown={(e) => { if (e.key === "Enter") onContinue(); }}
+            data-testid="topup-input"
+          />
+        </div>
+        <p className={`topup-hint ${tooLow || tooHigh ? "error" : ""}`}>
+          {tooLow ? `Minimum ${TOPUP_MIN} credits` : tooHigh ? `Maximum ${TOPUP_MAX} credits` : `From ${TOPUP_MIN} to ${TOPUP_MAX} credits`}
+        </p>
+        <button type="button" className="topup-continue" disabled={!valid || busy} onClick={onContinue} data-testid="topup-continue">
+          {busy ? "Please wait…" : "Continue"}
+        </button>
+        <p className="topup-subtext">You’ll be redirected to a payment provider</p>
+      </div>
+    </div>
+  );
+};
+
 // Upgrade icon SVG (new from user)
 const UpgradeIcon = ({ className, color = "currentColor" }) => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 551 551" fill={color} className={className}>
@@ -79,6 +163,7 @@ const showSuccessToast = (message) => {
 export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, currentLang, onLanguageChange, onOpenHelp }) => {
   const navigate = useNavigate();
   const [activeView, setActiveView] = useState('main');
+  const [showTopUp, setShowTopUp] = useState(false);
   const [editName, setEditName] = useState(user?.name || '');
   const [editUsername, setEditUsername] = useState(user?.username || user?.name || '');
   const [isSaving, setIsSaving] = useState(false);
@@ -137,6 +222,7 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
       plus: 'plusPlan',
       creator: 'creatorPlan'
     };
+    if (!planKeys[plan] && plan && plan !== 'free') return `${String(plan).charAt(0).toUpperCase()}${String(plan).slice(1)} Plan`;
     return t(planKeys[plan] || 'freePlan');
   };
 
@@ -309,7 +395,8 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
   const userName = user?.username || user?.name || user?.email?.split('@')[0] || 'User';
   const userPlan = user?.plan || 'free';
   const userCredits = user?.credits || 0;
-  const lastDeposit = user?.last_deposit || Math.max(userCredits, 100);
+  const hasSubscription = user?.subscription_status === 'active' || (!!user?.plan && user.plan !== 'free');
+  const lastDeposit = user?.last_deposit || Math.max(userCredits, 20);
   
   const progressPercentage = lastDeposit > 0 ? Math.round((userCredits / lastDeposit) * 100) : 0;
   const progressColor = getProgressColor(progressPercentage);
@@ -318,6 +405,7 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
   if (activeView === 'main') {
     return (
       <div className="profile-page-v2" data-testid="profile-page">
+        {showTopUp && <TopUpPopup user={user} onClose={() => setShowTopUp(false)} />}
         {/* Header */}
         <div className="profile-v2-header">
           <button 
@@ -366,6 +454,11 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
             <CreditsIcon className="credits-icon-small" color="#FFFFFF" />
             <span className="credits-amount">{userCredits}</span>
             <span className="credits-label">{t('creditsLeft')}</span>
+            {hasSubscription && (
+              <button type="button" className="credits-topup-btn" onClick={() => setShowTopUp(true)} data-testid="topup-btn">
+                + Top Up
+              </button>
+            )}
           </div>
           <div className="credits-progress-track">
             <div 

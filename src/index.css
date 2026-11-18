@@ -9671,3 +9671,94 @@ body {
 }
 
 
+
+/* ===================== Level picker (Low / Default / High) ===================== */
+.input-bottom-row:has(.level-picker) { justify-content: flex-start; gap: 6px; }
+.input-bottom-row:has(.level-picker) .input-bottom-right { margin-left: auto; }
+.level-picker { position: relative; display: inline-flex; align-items: center; margin-left: 2px; }
+.level-pill {
+  height: 28px; padding: 0 12px; border-radius: 9999px;
+  background: transparent; border: 1px solid #E8E8E8; color: #BDBDBD;
+  font-size: 13px; font-weight: 500; line-height: 26px; letter-spacing: -0.01em;
+  cursor: pointer; white-space: nowrap; transition: color .15s ease, border-color .15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.level-pill:hover, .level-pill.open { color: #E8E8E8; }
+.level-popover {
+  position: absolute; top: calc(100% + 12px); left: 50%; transform: translateX(-30%);
+  width: 300px; padding: 16px 18px 16px; z-index: 60;
+  background: #1C1C1E; border: 1px solid rgba(255,255,255,0.08); border-radius: 20px;
+  box-shadow: 0 18px 50px rgba(0,0,0,0.55);
+  animation: levelPopIn .16s ease-out;
+}
+@keyframes levelPopIn { from { opacity: 0; transform: translateX(-30%) translateY(-4px); } to { opacity: 1; transform: translateX(-30%) translateY(0); } }
+.level-labels { display: flex; justify-content: space-between; margin-bottom: 12px; }
+.level-label { background: none; border: 0; padding: 0; color: #8E8E93; font-size: 13px; font-weight: 600; cursor: pointer; }
+.level-label.active { color: #FFFFFF; }
+.level-track {
+  position: relative; height: 6px; border-radius: 9999px; background: #3A3A3C;
+  margin: 0 9px; cursor: pointer; touch-action: none;
+}
+.level-track::before { content: ""; position: absolute; inset: -12px -9px; } /* bigger hit area */
+.level-track-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 9999px; background: #0F7DFE; transition: width .22s cubic-bezier(.3,.7,.4,1); }
+.level-stop { position: absolute; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%; background: #636366; pointer-events: none; }
+.level-stop.on { background: rgba(255,255,255,0.7); }
+.level-knob {
+  position: absolute; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%;
+  background: #FFFFFF; box-shadow: 0 2px 8px rgba(0,0,0,0.45); cursor: grab; outline: none;
+  transition: left .22s cubic-bezier(.3,.7,.4,1);
+}
+.level-knob:active { cursor: grabbing; }
+.level-knob:focus-visible { box-shadow: 0 0 0 3px rgba(15,125,254,0.45); }
+.level-caption { margin-top: 14px; text-align: center; color: #8E8E93; font-size: 12.5px; line-height: 1.35; }
+
+/* ===================== Attachment thumbs (image + video) ===================== */
+.attachment-thumb-wrap { position: relative; width: 100%; height: 100%; }
+.attachment-thumb-wrap video.attachment-preview { display: block; background: #111; }
+.attachment-uploading-mask { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.45); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+.attachment-video-badge { position: absolute; left: 6px; bottom: 6px; width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); color: #fff; }
+
+/* edit notes under the edited video */
+.video-edit-notes { margin-top: 10px; max-width: 360px; text-align: center; }
+.video-edit-notes p { color: #8E8E93; font-size: 12px; line-height: 1.4; margin: 2px 0; }
+
+/* Upgrade page: "What Users Say" uses exactly the same size as the other headings */
+.upgrade-reviews-title { font-size: 38px; }
+@media (max-width: 768px) {
+  .upgrade-title, .upgrade-reviews-title, .upgrade-faq-title { font-size: 32px; }
+}
+
+/* ===================== Account: Top Up ===================== */
+.credits-topup-btn {
+  margin-left: auto; height: 30px; padding: 0 12px; border-radius: 9999px;
+  background: #FFFFFF; color: #000000; border: 0; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.credits-topup-btn:active { transform: scale(0.97); }
+.topup-overlay {
+  position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.6); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); padding: 16px;
+}
+.topup-popup {
+  width: 100%; max-width: 380px; background: #1C1C1E; border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 24px; padding: 18px 18px 16px; color: #fff; box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+  animation: levelPopIn2 .18s ease-out;
+}
+@keyframes levelPopIn2 { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+.topup-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.topup-title { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; margin: 0; }
+.topup-close { width: 32px; height: 32px; border-radius: 50%; border: 0; background: #2C2C2E; color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.topup-tabs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin: 0 -18px 12px; padding-left: 18px; padding-right: 18px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.topup-tabs::-webkit-scrollbar { display: none; }
+.topup-tab { flex: 0 0 auto; height: 34px; padding: 0 14px; border-radius: 9999px; border: 1px solid rgba(255,255,255,0.14); background: transparent; color: #E8E8E8; font-size: 14px; font-weight: 600; cursor: pointer; }
+.topup-tab.active { background: #FFFFFF; color: #000; border-color: #FFFFFF; }
+.topup-input-wrap { display: flex; align-items: center; gap: 8px; height: 52px; padding: 0 16px; border-radius: 16px; background: #2C2C2E; border: 1px solid transparent; }
+.topup-input-wrap:focus-within { border-color: rgba(255,255,255,0.25); }
+.topup-input-wrap.invalid { border-color: #FF453A; }
+.topup-input-icon { width: 18px; height: 18px; flex-shrink: 0; }
+.topup-input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #fff; font-size: 17px; font-weight: 600; }
+.topup-input::placeholder { color: #8E8E93; font-weight: 500; font-size: 15px; }
+.topup-hint { margin: 8px 2px 14px; font-size: 12px; color: #8E8E93; }
+.topup-hint.error { color: #FF453A; }
+.topup-continue { width: 100%; height: 50px; border-radius: 9999px; border: 0; background: #FFFFFF; color: #000; font-size: 16px; font-weight: 700; cursor: pointer; }
+.topup-continue:disabled { opacity: 0.4; cursor: default; }
+.topup-subtext { margin: 10px 0 0; text-align: center; font-size: 12px; color: #8E8E93; }

@@ -24,29 +24,17 @@ const SystemIcon = () => (
 
 const APPEARANCE_KEY = "slind_theme";
 
-export const applyTheme = (mode) => {
+// Dark theme only (product decision): ignore saved / system preference.
+export const applyTheme = (_mode) => {
   const html = document.documentElement;
-  let theme = mode;
-  if (mode === "system") {
-    // Respect OS preference — default to dark if no preference
-    theme = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-  }
-  if (theme === "dark") {
-    html.removeAttribute("data-theme");
-  } else {
-    html.setAttribute("data-theme", theme);
-  }
+  html.removeAttribute("data-theme");
+  html.classList.add("dark");
 };
 
 export const initThemeFromStorage = () => {
-  const saved = localStorage.getItem(APPEARANCE_KEY) || "system";
-  applyTheme(saved);
-  if (saved === "system") {
-    const mq = window.matchMedia("(prefers-color-scheme: light)");
-    const onChange = () => applyTheme("system");
-    mq.addEventListener?.("change", onChange);
-  }
-  return saved;
+  try { localStorage.setItem(APPEARANCE_KEY, "dark"); } catch (_) { /* ignore */ }
+  applyTheme("dark");
+  return "dark";
 };
 
 const TITLES = {

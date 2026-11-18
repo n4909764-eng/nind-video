@@ -141,7 +141,7 @@ const AuthPage = () => {
           name: email.split('@')[0] || 'Creator',
           avatar: '/assets/profile-icon.png',
           role: 'creator',
-          credits: 100,
+          credits: 20,
           created_at: new Date().toISOString(),
         };
         localStorage.setItem('slind_user', JSON.stringify(fallbackUser));

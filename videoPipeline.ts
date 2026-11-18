@@ -13,14 +13,18 @@ import https from 'https';
 import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import { CaptionStyle, styleSpec } from './captionStyle';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const FONT_DIR = path.resolve(__dirname, 'fonts');
-const HELPER = path.resolve(__dirname, 'tools/media_helper.py');
+export const HELPER = path.resolve(__dirname, 'tools/media_helper.py');
 
-const W = 720;
-const H = 1280;
-const FPS = 30;
+export const W = 720;
+export const H = 1280;
+export const FPS = 30;
+
+export type Level = 'low' | 'default' | 'high';
+export const normLevel = (l?: any): Level => (l === 'low' || l === 'high' ? l : 'default');
 
 export const MODELS = {
   get script() { return process.env.SCRIPT_MODEL || 'openai/gpt-4o-mini'; },
@@ -28,15 +32,52 @@ export const MODELS = {
   get image() { return process.env.IMAGE_MODEL || 'google/gemini-3.1-flash-image'; },
   get overlay() { return process.env.OVERLAY_IMAGE_MODEL || 'google/gemini-2.5-flash-image'; },
   get vision() { return process.env.VISION_MODEL || 'google/gemini-2.5-flash-lite'; },
+  get ttsHigh() { return process.env.TTS_MODEL_HIGH || 'openai/gpt-audio'; },
+  get imageCheap() { return process.env.IMAGE_MODEL_LOW || 'google/gemini-2.5-flash-image'; },
 };
 
+/** Per-level behaviour. Default = the original pipeline. */
+export interface LevelCfg {
+  level: Level; tts: string; image: string; visionMin: number; hd: boolean;
+  maxAiPhotos: number; capUsd: number; scriptRule: string; maxOverlays: number;
+}
+export function levelCfg(level: Level): LevelCfg {
+  if (level === 'low') return {
+    level, tts: MODELS.tts, image: MODELS.imageCheap, visionMin: 6, hd: false, maxAiPhotos: 2, capUsd: 0.15, maxOverlays: 1,
+    scriptRule: 'media_type: COST-SAVING mode. Use "stock_video" or "stock_photo" for EVERY scene (real places, people, objects, nature, cities, events, technology). Use "ai_photo" in at most ONE scene, only if nothing real could possibly show it.',
+  };
+  if (level === 'high') return {
+    level, tts: MODELS.ttsHigh, image: MODELS.image, visionMin: 8, hd: true, maxAiPhotos: 99, capUsd: 1.2, maxOverlays: 3,
+    scriptRule: 'media_type: HIGH-QUALITY mode. Mix the best real footage and photoreal AI photos: about half of the scenes "stock_video"/"stock_photo" (iconic, cinematic, high-resolution shots), the rest "ai_photo" for moments that need a precise composition.',
+  };
+  return {
+    level, tts: MODELS.tts, image: MODELS.image, visionMin: 7, hd: false, maxAiPhotos: 99, capUsd: 0.6, maxOverlays: 2,
+    scriptRule: 'media_type: mix real footage and AI. Use "stock_video" for real places, nature, cities, people doing generic actions, technology, animals, events; "stock_photo" for real well-known things, landmarks, historical subjects; "ai_photo" only for things impossible to film/find (specific fictional situations, the future, very specific compositions). At least 40% of scenes must be stock_video or stock_photo.',
+  };
+}
+
+/** Rough upper-bound price per paid call, used to stay inside the user's credit budget. */
+export const EST = { image: 0.07, imageCheap: 0.042, overlay: 0.042, vision: 0.002, script: 0.003, ttsMini: 0.02, ttsHigh: 0.08 };
+
 const orKey = () => process.env.OPENROUTER_API_KEY || '';
-const pyBin = () => process.env.MEDIA_PYTHON || 'python3';
+export const pyBin = () => process.env.MEDIA_PYTHON || 'python3';
 const UA = 'nindVideoBot/1.0 (https://nind.pro)';
 
 // ------------------------------------------------------------------ cost tracking
-export interface CostTracker { usd: number; items: { label: string; model: string; usd: number }[] }
-export const newCostTracker = (): CostTracker => ({ usd: 0, items: [] });
+export interface CostTracker { usd: number; items: { label: string; model: string; usd: number }[]; limitUsd?: number; pendingUsd?: number }
+export const newCostTracker = (limitUsd?: number): CostTracker => ({ usd: 0, items: [], limitUsd, pendingUsd: 0 });
+
+/** Reserve an estimated amount before a paid call. Returns false if it would exceed the budget. */
+export function reserve(cost: CostTracker | undefined, est: number): boolean {
+  if (!cost) return true;
+  const pending = cost.pendingUsd || 0;
+  if (cost.limitUsd !== undefined && cost.usd + pending + est > cost.limitUsd) return false;
+  cost.pendingUsd = pending + est;
+  return true;
+}
+export function release(cost: CostTracker | undefined, est: number) {
+  if (cost) cost.pendingUsd = Math.max(0, (cost.pendingUsd || 0) - est);
+}
 
 function addCost(cost: CostTracker | undefined, label: string, model: string, usd: number) {
   if (!cost || !isFinite(usd) || usd <= 0) return;
@@ -47,7 +88,7 @@ function addCost(cost: CostTracker | undefined, label: string, model: string, us
 // ------------------------------------------------------------------ small utils
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function run(cmd: string, args: string[], opts: { timeoutMs?: number } = {}): Promise<{ code: number; out: string; err: string }> {
+export function run(cmd: string, args: string[], opts: { timeoutMs?: number } = {}): Promise<{ code: number; out: string; err: string }> {
   return new Promise((resolve) => {
     const p = spawn(cmd, args);
     let out = '';
@@ -60,9 +101,9 @@ function run(cmd: string, args: string[], opts: { timeoutMs?: number } = {}): Pr
   });
 }
 
-const ffmpeg = (args: string[], timeoutMs = 10 * 60 * 1000) => run('ffmpeg', ['-y', '-v', 'error', ...args], { timeoutMs });
+export const ffmpeg = (args: string[], timeoutMs = 10 * 60 * 1000) => run('ffmpeg', ['-y', '-v', 'error', ...args], { timeoutMs });
 
-async function probeDuration(file: string): Promise<number> {
+export async function probeDuration(file: string): Promise<number> {
   const r = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', file]);
   const d = parseFloat(r.out.trim());
   return isFinite(d) ? d : 0;
@@ -95,7 +136,7 @@ function httpJson(url: string, opts: { method?: string; headers?: Record<string,
   });
 }
 
-function download(url: string, out: string, maxBytes = 80 * 1024 * 1024, timeoutSec = 60): Promise<boolean> {
+export function download(url: string, out: string, maxBytes = 80 * 1024 * 1024, timeoutSec = 60): Promise<boolean> {
   return new Promise((resolve) => {
     const p = spawn('curl', ['-sSL', '--fail', '--max-time', String(timeoutSec), '--max-filesize', String(maxBytes), '-A', UA, url, '-o', out]);
     p.on('close', (code) => resolve(code === 0 && fs.existsSync(out) && fs.statSync(out).size > 2048));
@@ -103,7 +144,7 @@ function download(url: string, out: string, maxBytes = 80 * 1024 * 1024, timeout
   });
 }
 
-async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) => Promise<R>): Promise<R[]> {
+export async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let next = 0;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -116,7 +157,7 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T, i: number) =
   return out;
 }
 
-const norm = (w: string) => w.toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '');
+export const norm = (w: string) => w.toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '');
 
 // ------------------------------------------------------------------ OpenRouter
 async function fetchGenerationCost(id: string): Promise<number> {
@@ -145,7 +186,7 @@ export async function orChat(payload: any, cost: CostTracker | undefined, label:
   return res;
 }
 
-function extractJson(text: string): any {
+export function extractJson(text: string): any {
   try { return JSON.parse(text); } catch { /* fallthrough */ }
   const m = text.match(/\{[\s\S]*\}/);
   if (m) { try { return JSON.parse(m[0]); } catch { /* ignore */ } }
@@ -185,7 +226,7 @@ const SCENE_SCHEMA = `{
   ]
 }`;
 
-const SCRIPT_RULES = (langLine: string, format: string) => `You are an elite short-form video director and scriptwriter (TikTok, Reels, Shorts).
+const SCRIPT_RULES = (langLine: string, format: string, mediaRule?: string) => `You are an elite short-form video director and scriptwriter (TikTok, Reels, Shorts).
 ${langLine}
 Format style: ${format}.
 
@@ -193,7 +234,7 @@ RULES:
 1. Total length 15-40 s (5-8 scenes) unless the user asked for a specific duration. Strong hook, build-up, satisfying ending. Never truncate the story.
 2. voiceover_chunk: natural spoken sentences. The full voiceover = all chunks in order. Do not put stage directions or emojis in it.
 3. Every scene's visuals must literally match what is being said at that exact moment.
-4. media_type: mix real footage and AI. Use "stock_video" for real places, nature, cities, people doing generic actions, technology, animals, events; "stock_photo" for real well-known things, landmarks, historical subjects; "ai_photo" only for things impossible to film/find (specific fictional situations, the future, very specific compositions). At least 40% of scenes must be stock_video or stock_photo.
+4. ${mediaRule || levelCfg('default').scriptRule}
 5. search_query: ALWAYS English, concrete nouns (e.g. "chernobyl reactor ruins", "geiger counter", "surfer big wave").
 6. ai_image_prompt: describe a REAL photograph: real people/objects, natural light, real location; never ask for illustration, render, cartoon, or text.
 7. headline: REQUIRED in exactly 2 scenes (3 if there are 7+ scenes) - the key punchlines. phrase = 2-6 words copied verbatim and consecutively from that scene's voiceover_chunk; highlight = the single most important word of the phrase.
@@ -204,13 +245,14 @@ ${SCENE_SCHEMA}`;
 
 export async function writeScript(opts: {
   prompt: string; language: string; format: string; cost: CostTracker;
-  previous?: { scenes: SceneSpec[]; full_script: string };
+  previous?: { scenes: SceneSpec[]; full_script: string }; level?: Level;
 }): Promise<{ title: string; scenes: SceneSpec[]; needs_new_voiceover: boolean }> {
   const lang = String(opts.language || 'auto').toLowerCase();
   const langLine = lang === 'auto' || !lang
     ? 'Language of the voiceover, headlines and overlays text: the same language the user wrote the prompt in.'
     : `Language of the voiceover and headlines: ${lang.startsWith('ru') ? 'Russian' : lang.startsWith('en') ? 'English' : lang}.`;
-  let system = SCRIPT_RULES(langLine, opts.format || 'auto');
+  const cfg = levelCfg(normLevel(opts.level));
+  let system = SCRIPT_RULES(langLine, opts.format || 'auto', cfg.scriptRule);
   let user = `User prompt: "${opts.prompt}"`;
   if (opts.previous && opts.previous.scenes?.length) {
     system += `\n\nYou are EDITING an existing video. Apply ONLY the user's requested change. Keep every other scene identical (same voiceover_chunk, same visuals). Set "needs_new_voiceover": true only if any narration text changes. Per scene set "needs_new_visual": true only if that scene's visual must change.`;
@@ -243,14 +285,16 @@ export async function writeScript(opts: {
       needs_new_visual: s.needs_new_visual !== false,
     }));
   if (!scenes.length) throw new Error('Script generation returned no scenes');
+  let ai = 0;
+  for (const s of scenes) if (s.media_type === 'ai_photo' && ++ai > cfg.maxAiPhotos) s.media_type = 'stock_photo';
   return { title: String(data.title || opts.prompt.slice(0, 40)), scenes, needs_new_voiceover: data.needs_new_voiceover !== false };
 }
 
 // ------------------------------------------------------------------ 2. voiceover
-export function generateSpeech(text: string, outMp3: string, cost: CostTracker, voice = 'alloy'): Promise<boolean> {
+export function generateSpeech(text: string, outMp3: string, cost: CostTracker, voice = 'alloy', model = MODELS.tts): Promise<boolean> {
   return new Promise((resolve) => {
     const payload = JSON.stringify({
-      model: MODELS.tts,
+      model,
       modalities: ['text', 'audio'],
       audio: { voice, format: 'pcm16' },
       stream: true,
@@ -288,7 +332,7 @@ export function generateSpeech(text: string, outMp3: string, cost: CostTracker, 
       });
       res.on('end', async () => {
         if (!isFinite(usd) && genId) usd = await fetchGenerationCost(genId);
-        addCost(cost, 'voiceover', MODELS.tts, usd || 0);
+        addCost(cost, 'voiceover', model, usd || 0);
         if (!bufs.length) return resolve(false);
         const pcm = outMp3.replace(/\.[^.]+$/, '.pcm');
         fs.writeFileSync(pcm, Buffer.concat(bufs));
@@ -331,7 +375,7 @@ export async function alignWords(audio: string, script: string, workDir: string,
 // ------------------------------------------------------------------ 4. media: stock search + vision verification
 interface Candidate { source: string; kind: 'video' | 'photo'; thumb: string; url: string; page_url?: string; w?: number; h?: number }
 
-async function pexels(query: string, kind: 'video' | 'photo'): Promise<Candidate[]> {
+async function pexels(query: string, kind: 'video' | 'photo', hd = false): Promise<Candidate[]> {
   const key = process.env.PEXELS_API_KEY;
   if (!key) return [];
   try {
@@ -339,7 +383,7 @@ async function pexels(query: string, kind: 'video' | 'photo'): Promise<Candidate
       const j = await httpJson(`https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=5`, { headers: { Authorization: key }, timeoutMs: 15000 });
       return (j.videos || []).map((v: any) => {
         const files = (v.video_files || []).filter((f: any) => f.file_type === 'video/mp4' && f.width && f.height)
-          .sort((a: any, b: any) => Math.abs(a.height - 1280) - Math.abs(b.height - 1280));
+          .sort((a: any, b: any) => Math.abs(a.height - (hd ? 1920 : 1280)) - Math.abs(b.height - (hd ? 1920 : 1280)));
         return files[0] ? { source: 'pexels', kind, thumb: v.image, url: files[0].link, page_url: v.url, w: files[0].width, h: files[0].height } : null;
       }).filter(Boolean);
     }
@@ -348,14 +392,14 @@ async function pexels(query: string, kind: 'video' | 'photo'): Promise<Candidate
   } catch (e) { console.warn('[pexels]', (e as Error).message); return []; }
 }
 
-async function pixabay(query: string, kind: 'video' | 'photo'): Promise<Candidate[]> {
+async function pixabay(query: string, kind: 'video' | 'photo', hd = false): Promise<Candidate[]> {
   const key = process.env.PIXABAY_API_KEY;
   if (!key) return [];
   try {
     if (kind === 'video') {
       const j = await httpJson(`https://pixabay.com/api/videos/?key=${key}&q=${encodeURIComponent(query)}&per_page=5&safesearch=true`, { timeoutMs: 15000 });
       return (j.hits || []).map((h: any) => {
-        const v = h.videos?.medium?.url ? h.videos.medium : h.videos?.small;
+        const v = hd && h.videos?.large?.url ? h.videos.large : h.videos?.medium?.url ? h.videos.medium : h.videos?.small;
         return v?.url ? { source: 'pixabay', kind, thumb: v.thumbnail || h.videos?.tiny?.thumbnail, url: v.url, page_url: h.pageURL, w: v.width, h: v.height } : null;
       }).filter((c: any) => c && c.thumb);
     }
@@ -366,7 +410,19 @@ async function pixabay(query: string, kind: 'video' | 'photo'): Promise<Candidat
 
 const WIKI_BAD = /\b(map|maps|diagram|logo|chart|graph|flag|coat of arms|seal|icon|symbol|scheme|schema|drawing|svg|pdf|tiff?|stamp|poster|document|animation|animated|render|veo|ai-generated|illustration|cartoon|screenshot)\b/i;
 
-export async function wikimedia(query: string, kind: 'video' | 'photo'): Promise<Candidate[]> {
+/** Openverse (CC-licensed photos, no API key needed). */
+async function openverse(query: string, kind: 'video' | 'photo', hd = false): Promise<Candidate[]> {
+  if (kind !== 'photo') return [];
+  try {
+    const j = await httpJson(`https://api.openverse.org/v1/images/?q=${encodeURIComponent(query)}&page_size=8&mature=false&category=photograph${hd ? '&size=large' : ''}`, { timeoutMs: 15000 });
+    return (j.results || [])
+      .filter((r: any) => r.url && (r.width || 0) >= (hd ? 1400 : 900) && !WIKI_BAD.test(r.title || ''))
+      .slice(0, 5)
+      .map((r: any) => ({ source: 'openverse', kind, thumb: r.thumbnail || r.url, url: r.url, page_url: r.foreign_landing_url, w: r.width, h: r.height }));
+  } catch (e) { console.warn('[openverse]', (e as Error).message); return []; }
+}
+
+export async function wikimedia(query: string, kind: 'video' | 'photo', hd = false): Promise<Candidate[]> {
   try {
     const q = `${query} ${kind === 'video' ? 'filetype:video' : 'filetype:bitmap'}`;
     const url = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrsearch=${encodeURIComponent(q)}&gsrlimit=10&prop=imageinfo|videoinfo&iiprop=url|mime|size&iiurlwidth=1280&viprop=derivatives&format=json`;
@@ -383,7 +439,7 @@ export async function wikimedia(query: string, kind: 'video' | 'photo'): Promise
         out.push({ source: 'wikimedia', kind, thumb, url: ii.thumburl, page_url: ii.descriptionurl, w: ii.width, h: ii.height });
       } else {
         const ders = (p.videoinfo?.[0]?.derivatives || []) as any[];
-        const pick = ders.find((d) => /720p.*\.webm$/.test(d.src)) || ders.find((d) => /480p.*\.webm$/.test(d.src)) || ders.find((d) => /\.webm$/.test(d.src));
+        const pick = (hd ? ders.find((d) => /1080p.*\.webm$/.test(d.src)) : undefined) || ders.find((d) => /720p.*\.webm$/.test(d.src)) || ders.find((d) => /480p.*\.webm$/.test(d.src)) || ders.find((d) => /\.webm$/.test(d.src));
         if (!pick) continue;
         out.push({ source: 'wikimedia', kind, thumb, url: pick.src, page_url: ii.descriptionurl, w: ii.width, h: ii.height });
       }
@@ -394,7 +450,7 @@ export async function wikimedia(query: string, kind: 'video' | 'photo'): Promise
 }
 
 /** Ask a cheap vision model which candidate (if any) really shows the scene. */
-async function verifyCandidates(scene: SceneSpec, cands: Candidate[], workDir: string, cost: CostTracker, tag: string): Promise<{ idx: number; score: number }> {
+async function verifyCandidates(scene: SceneSpec, cands: Candidate[], workDir: string, cost: CostTracker, tag: string, minScore = 7): Promise<{ idx: number; score: number }> {
   const thumbs = await mapLimit(cands, 4, async (c, i) => {
     const raw = path.join(workDir, `cand_${tag}_${i}.bin`);
     const jpg = path.join(workDir, `cand_${tag}_${i}.jpg`);
@@ -409,9 +465,10 @@ async function verifyCandidates(scene: SceneSpec, cands: Candidate[], workDir: s
     text: `You check stock media for a short video. Scene narration: "${scene.voiceover_chunk}". Required visual: "${scene.visual_description}".
 Below are ${valid.length} candidate images (${cands[0].kind === 'video' ? 'video thumbnails' : 'photos'}), numbered 1..${valid.length} in order.
 Score each 0-10 for how well it literally shows the required visual AND is a clean real-world photo/footage frame (penalize maps, diagrams, text-heavy images, logos, collages, watermarks, low quality, unrelated subjects).
-Return ONLY JSON: {"scores":[...], "best": <number 1..${valid.length} or 0 if none scores >= 7>}`,
+Return ONLY JSON: {"scores":[...], "best": <number 1..${valid.length} or 0 if none scores >= ${minScore}>}`,
   }];
   valid.forEach((v) => content.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${v.t}` } }));
+  if (!reserve(cost, EST.vision)) return { idx: -1, score: 0 };
   try {
     const res = await orChat({ model: MODELS.vision, messages: [{ role: 'user', content }], response_format: { type: 'json_object' }, temperature: 0 }, cost, `vision check scene ${scene.scene_num}`);
     const j = extractJson(res?.choices?.[0]?.message?.content || '') || {};
@@ -419,15 +476,15 @@ Return ONLY JSON: {"scores":[...], "best": <number 1..${valid.length} or 0 if no
     let best = Number(j.best) || 0;
     if (!best && scores.length) {
       const m = Math.max(...scores);
-      if (m >= 7) best = scores.indexOf(m) + 1;
+      if (m >= minScore) best = scores.indexOf(m) + 1;
     }
-    const score = best ? (scores[best - 1] ?? 7) : 0;
-    if (best < 1 || best > valid.length || score < 7) return { idx: -1, score };
+    const score = best ? (scores[best - 1] ?? minScore) : 0;
+    if (best < 1 || best > valid.length || score < minScore) return { idx: -1, score };
     return { idx: valid[best - 1].i, score };
   } catch (e) {
     console.warn('[vision]', (e as Error).message);
     return { idx: -1, score: 0 };
-  }
+  } finally { release(cost, EST.vision); }
 }
 
 const QUERY_NOISE = /\b(footage|video|videos|clip|photo|photos|image|images|picture|shot|stock|hd|4k|scene|of|the|a|an|and|with|in|on)\b/gi;
@@ -441,23 +498,31 @@ function queryVariants(q: string): string[] {
   return [...new Set(out)].slice(0, 4);
 }
 
-export async function findStock(scene: SceneSpec, kind: 'video' | 'photo', workDir: string, cost: CostTracker, i: number): Promise<SceneSpec['media'] | null> {
+export interface StockOpts { minScore?: number; hd?: boolean; exclude?: Set<string> }
+
+export async function findStock(scene: SceneSpec, kind: 'video' | 'photo', workDir: string, cost: CostTracker, i: number | string, o: StockOpts = {}): Promise<SceneSpec['media'] | null> {
   const variants = queryVariants(scene.search_query || scene.visual_description);
   let lists: Candidate[][] = [];
+  const hd = !!o.hd;
   for (const q of variants) {
-    lists = await Promise.all([pexels(q, kind), pixabay(q, kind), wikimedia(q, kind)]);
+    lists = await Promise.all([pexels(q, kind, hd), pixabay(q, kind, hd), wikimedia(q, kind, hd), openverse(q, kind, hd)]);
+    if (o.exclude) lists = lists.map((l) => l.filter((c) => !o.exclude!.has(c.url)));
     if (lists.reduce((n, l) => n + l.length, 0) >= 2) break;
   }
   // interleave sources, max 6 candidates per vision call
   const cands: Candidate[] = [];
   for (let k = 0; k < 5 && cands.length < 6; k++) for (const l of lists) if (l[k] && cands.length < 6) cands.push(l[k]);
   if (!cands.length) return null;
-  const { idx, score } = await verifyCandidates(scene, cands, workDir, cost, `${i}_${kind}`);
+  const { idx, score } = await verifyCandidates(scene, cands, workDir, cost, `${i}_${kind}`, o.minScore ?? 7);
   if (idx < 0) return null;
   const c = cands[idx];
+  o.exclude?.add(c.url);
   const ext = kind === 'video' ? (c.url.endsWith('.webm') ? '.webm' : '.mp4') : '.jpg';
   const file = path.join(workDir, `scene_${i}_${Date.now()}${ext}`);
   if (!(await download(c.url, file, kind === 'video' ? 120 * 1024 * 1024 : 25 * 1024 * 1024, 120))) return null;
+  // make sure the file is really decodable (never leave a grey/blank scene)
+  const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width', '-of', 'csv=p=0', file]);
+  if (probe.code !== 0 || !parseInt(probe.out)) { try { fs.unlinkSync(file); } catch { /* ignore */ } return null; }
   return { kind, source: c.source, file, page_url: c.page_url, verified_score: score };
 }
 
@@ -479,29 +544,32 @@ async function imageFromResponse(res: any, out: string): Promise<boolean> {
   return fs.statSync(out).size > 1024;
 }
 
-export async function generateRealPhoto(prompt: string, out: string, cost: CostTracker, label: string): Promise<boolean> {
+export async function generateRealPhoto(prompt: string, out: string, cost: CostTracker, label: string, model = MODELS.image, aspect = '9:16'): Promise<boolean> {
+  const est = model === MODELS.image ? EST.image : EST.imageCheap;
+  if (!reserve(cost, est)) { console.warn(`[image] skipped "${label}": credit budget reached`); return false; }
   try {
     const res = await orChat({
-      model: MODELS.image,
+      model,
       modalities: ['image', 'text'],
-      image_config: { aspect_ratio: '9:16' },
-      messages: [{ role: 'user', content: `${REALISM_PREFIX}\nScene: ${prompt}\n${REALISM_NEGATIVE}` }],
+      image_config: { aspect_ratio: aspect },
+      messages: [{ role: 'user', content: `${REALISM_PREFIX.replace('Vertical 9:16 framing.', aspect === '9:16' ? 'Vertical 9:16 framing.' : `${aspect} framing.`)}\nScene: ${prompt}\n${REALISM_NEGATIVE}` }],
     }, cost, label);
     return await imageFromResponse(res, out);
   } catch (e) {
     console.warn('[image]', (e as Error).message);
     return false;
-  }
+  } finally { release(cost, est); }
 }
 
 // ------------------------------------------------------------------ 6. overlay elements (transparent PNG)
-async function makeOverlayElement(element: string, workDir: string, cost: CostTracker): Promise<string | null> {
+export async function makeOverlayElement(element: string, workDir: string, cost: CostTracker): Promise<string | null> {
   const dir = path.join(workDir, 'overlays');
   fs.mkdirSync(dir, { recursive: true });
   const id = crypto.createHash('md5').update(element.toLowerCase()).digest('hex').slice(0, 10);
   const outPng = path.join(dir, `${id}.png`);
   if (fs.existsSync(outPng)) return outPng;
   const raw = path.join(dir, `${id}_raw.png`);
+  if (!reserve(cost, EST.overlay)) { console.warn('[overlay] skipped: credit budget reached'); return null; }
   try {
     const res = await orChat({
       model: MODELS.overlay,
@@ -510,7 +578,7 @@ async function makeOverlayElement(element: string, workDir: string, cost: CostTr
       messages: [{ role: 'user', content: `A single ${element}, glossy high-detail 3D sticker/emoji style object, centered, fully visible with margin around it, isolated on a perfectly plain solid white background. No shadow on the background, no text, no other objects, no frame.` }],
     }, cost, `overlay "${element}"`);
     if (!(await imageFromResponse(res, raw))) return null;
-  } catch (e) { console.warn('[overlay]', (e as Error).message); return null; }
+  } catch (e) { console.warn('[overlay]', (e as Error).message); return null; } finally { release(cost, EST.overlay); }
   const r = await run(pyBin(), [HELPER, 'rembg', raw, outPng], { timeoutMs: 5 * 60 * 1000 });
   if (r.code !== 0 || !fs.existsSync(outPng)) {
     // fallback: chroma-key the white background
@@ -530,7 +598,7 @@ function motionFilter(i: number, frames: number) {
   return `zoompan=z='1.05+0.12*on/${frames}':d=${frames}:s=1440x2560:fps=${FPS}:x='(iw-iw/zoom)*on/${frames}':y='(ih-ih/zoom)*on/${frames}'`;
 }
 
-async function renderSceneClip(media: NonNullable<SceneSpec['media']>, i: number, frames: number, out: string): Promise<boolean> {
+export async function renderSceneClip(media: NonNullable<SceneSpec['media']>, i: number, frames: number, out: string): Promise<boolean> {
   const enc = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p', '-r', String(FPS), '-an', '-frames:v', String(frames)];
   if (media.kind === 'video') {
     const dur = frames / FPS;
@@ -555,7 +623,7 @@ async function renderSceneClip(media: NonNullable<SceneSpec['media']>, i: number
 }
 
 // locate a phrase (sequence of words) inside a word range; returns absolute index of first word
-function findPhrase(words: Word[], from: number, to: number, phrase: string): number {
+export function findPhrase(words: Word[], from: number, to: number, phrase: string): number {
   const p = phrase.split(/\s+/).map(norm).filter(Boolean);
   if (!p.length) return -1;
   for (let i = from; i + p.length - 1 <= to; i++) {
@@ -566,7 +634,7 @@ function findPhrase(words: Word[], from: number, to: number, phrase: string): nu
   return -1;
 }
 
-function findWord(words: Word[], from: number, to: number, word: string): number {
+export function findWord(words: Word[], from: number, to: number, word: string): number {
   const t = norm(word);
   if (!t) return -1;
   for (let i = from; i <= to; i++) if (norm(words[i].w) === t) return i;
@@ -584,28 +652,80 @@ export interface PipelineInput {
   outVideo: string;
   outPoster: string;
   voice?: string;
+  level?: Level;
+  style?: CaptionStyle;
   attachedImages?: string[]; // absolute paths to user images, used as scene photos in order
   previous?: { scenes: SceneSpec[]; full_script: string; words?: Word[] };
   onProgress: (pct: number, msg: string) => void;
   cost: CostTracker;
 }
 
-export interface PipelineResult { title: string; scenes: SceneSpec[]; full_script: string; words: Word[]; audioFile: string; duration: number }
+export interface PipelineResult { title: string; scenes: SceneSpec[]; full_script: string; words: Word[]; audioFile: string; duration: number; ranges: { from: number; to: number }[]; sceneFrames: number[] }
+
+export function sceneTiming(scenes: SceneSpec[], words: Word[], duration: number) {
+  const ranges: { from: number; to: number }[] = [];
+  let idx = 0;
+  for (const s of scenes) {
+    const n = s.voiceover_chunk.split(/\s+/).filter(Boolean).length;
+    ranges.push({ from: idx, to: Math.min(words.length - 1, idx + n - 1) });
+    idx += n;
+  }
+  const sceneStart = (i: number) => (i === 0 ? 0 : words[ranges[i].from]?.start ?? 0);
+  const boundaries = scenes.map((_, i) => sceneStart(i));
+  boundaries.push(duration);
+  const frameAt = (t: number) => Math.round(t * FPS);
+  const sceneFrames = scenes.map((_, i) => Math.max(8, frameAt(boundaries[i + 1]) - frameAt(boundaries[i])));
+  return { ranges, boundaries, sceneFrames };
+}
+
+/** Find real media for one scene (stock -> AI photo). Returns null if nothing could be obtained. */
+export async function mediaForScene(s: SceneSpec, i: number, workDir: string, cost: CostTracker, cfg: LevelCfg,
+  state: { ai: number; exclude: Set<string> }, force?: 'stock_video' | 'stock_photo' | 'ai_photo'): Promise<SceneSpec['media'] | null> {
+  const type = force || s.media_type;
+  const so: StockOpts = { minScore: cfg.visionMin, hd: cfg.hd, exclude: state.exclude };
+  let m: SceneSpec['media'] | null = null;
+  if (type === 'stock_video') m = (await findStock(s, 'video', workDir, cost, i, so)) || (await findStock(s, 'photo', workDir, cost, i, so));
+  else if (type === 'stock_photo') m = (await findStock(s, 'photo', workDir, cost, i, so)) || (cfg.level !== 'low' ? null : await findStock(s, 'video', workDir, cost, i, so));
+  if (!m && (type === 'ai_photo' || state.ai < cfg.maxAiPhotos)) {
+    state.ai++;
+    const f = path.join(workDir, `scene_${i}_${Date.now()}.png`);
+    if (await generateRealPhoto(s.ai_image_prompt || s.visual_description, f, cost, `photo scene ${s.scene_num}`, cfg.image)) m = { kind: 'photo', source: 'ai', file: f };
+    else state.ai--;
+  }
+  return m;
+}
+
+/** Never leave a blank scene: borrow the nearest scene's media, or as a last resort a moving dark-blue gradient. */
+export async function fillMissingMedia(scenes: SceneSpec[], workDir: string) {
+  const have = scenes.map((s, i) => (s.media?.file && fs.existsSync(s.media.file) ? i : -1)).filter((i) => i >= 0);
+  for (let i = 0; i < scenes.length; i++) {
+    if (scenes[i].media?.file && fs.existsSync(scenes[i].media!.file)) continue;
+    if (have.length) {
+      const j = have.reduce((b, x) => (Math.abs(x - i) < Math.abs(b - i) ? x : b), have[0]);
+      scenes[i].media = { ...scenes[j].media!, source: `${scenes[j].media!.source}:reused` };
+    } else {
+      const f = path.join(workDir, `scene_${i}_gradient.png`);
+      await ffmpeg(['-f', 'lavfi', '-i', `gradients=s=${W}x${H}:c0=0x0b1a3a:c1=0x0f7dfe:c2=0x05060a:n=3:speed=0.01`, '-frames:v', '1', f]);
+      scenes[i].media = { kind: 'photo', source: 'gradient', file: f };
+    }
+  }
+}
 
 export async function runVideoPipeline(inp: PipelineInput): Promise<PipelineResult> {
   const { workDir, cost } = inp;
   fs.mkdirSync(workDir, { recursive: true });
   const ru = String(inp.language).toLowerCase().startsWith('ru');
   const say = (en: string, r: string) => (ru ? r : en);
+  const cfg = levelCfg(normLevel(inp.level));
 
   // 1. script
   inp.onProgress(8, say('Writing the script...', 'Пишем сценарий...'));
-  const script = await writeScript({ prompt: inp.prompt, language: inp.language, format: inp.format, cost, previous: inp.previous });
+  const script = await writeScript({ prompt: inp.prompt, language: inp.language, format: inp.format, cost, previous: inp.previous, level: cfg.level });
   const scenes = script.scenes;
   const fullScript = scenes.map((s) => s.voiceover_chunk).join(' ');
 
   // 2. voiceover (+ reuse when an edit doesn't touch narration)
-  const audioFile = path.join(workDir, 'voiceover.mp3');
+  const audioFile = path.join(workDir, `voiceover_${Date.now()}.mp3`);
   const prevAudio = path.join(workDir, 'prev_voiceover.mp3');
   let words: Word[] | null = null;
   const sameNarration = !!inp.previous && inp.previous.full_script === fullScript && fs.existsSync(prevAudio) && Array.isArray(inp.previous.words) && inp.previous.words.length > 0;
@@ -614,7 +734,7 @@ export async function runVideoPipeline(inp: PipelineInput): Promise<PipelineResu
     words = inp.previous!.words!;
   } else {
     inp.onProgress(18, say('Recording the voiceover...', 'Записываем озвучку...'));
-    const ok = await generateSpeech(fullScript, audioFile, cost, inp.voice || 'alloy');
+    const ok = await generateSpeech(fullScript, audioFile, cost, inp.voice || 'alloy', cfg.tts);
     if (!ok) throw new Error('Voiceover generation failed');
   }
   const duration = await probeDuration(audioFile);
@@ -622,24 +742,12 @@ export async function runVideoPipeline(inp: PipelineInput): Promise<PipelineResu
     inp.onProgress(26, say('Syncing subtitles to the voice...', 'Синхронизируем субтитры с голосом...'));
     words = await alignWords(audioFile, fullScript, workDir, inp.language);
   }
-
-  // scene word ranges & time windows
-  const ranges: { from: number; to: number }[] = [];
-  let idx = 0;
-  for (const s of scenes) {
-    const n = s.voiceover_chunk.split(/\s+/).filter(Boolean).length;
-    ranges.push({ from: idx, to: Math.min(words.length - 1, idx + n - 1) });
-    idx += n;
-  }
-  const sceneStart = (i: number) => (i === 0 ? 0 : words![ranges[i].from]?.start ?? 0);
-  const boundaries = scenes.map((_, i) => sceneStart(i));
-  boundaries.push(duration);
-  const frameAt = (t: number) => Math.round(t * FPS);
-  const sceneFrames = scenes.map((_, i) => Math.max(8, frameAt(boundaries[i + 1]) - frameAt(boundaries[i])));
+  const { ranges, boundaries, sceneFrames } = sceneTiming(scenes, words, duration);
 
   // 3. media per scene
   inp.onProgress(32, say('Finding real footage and generating photos...', 'Подбираем реальные видео/фото и генерируем кадры...'));
   let done = 0;
+  const state = { ai: 0, exclude: new Set<string>() };
   await mapLimit(scenes, 3, async (s, i) => {
     const prev = inp.previous?.scenes?.[i];
     if (inp.attachedImages?.[i] && fs.existsSync(inp.attachedImages[i])) {
@@ -647,92 +755,109 @@ export async function runVideoPipeline(inp: PipelineInput): Promise<PipelineResu
     } else if (prev && s.needs_new_visual === false && prev.media?.file && fs.existsSync(prev.media.file)) {
       s.media = prev.media;
     } else {
-      let m: SceneSpec['media'] | null = null;
-      if (s.media_type === 'stock_video') m = (await findStock(s, 'video', workDir, cost, i)) || (await findStock(s, 'photo', workDir, cost, i));
-      else if (s.media_type === 'stock_photo') m = await findStock(s, 'photo', workDir, cost, i);
-      if (!m) {
-        const f = path.join(workDir, `scene_${i}_${Date.now()}.png`);
-        if (await generateRealPhoto(s.ai_image_prompt || s.visual_description, f, cost, `photo scene ${s.scene_num}`)) m = { kind: 'photo', source: 'ai', file: f };
-      }
-      if (!m) {
-        const f = path.join(workDir, `scene_${i}_fallback.png`);
-        await ffmpeg(['-f', 'lavfi', '-i', `color=c=0x111318:s=${W}x${H}`, '-frames:v', '1', f]);
-        m = { kind: 'photo', source: 'fallback', file: f };
-      }
-      s.media = m;
+      s.media = (await mediaForScene(s, i, workDir, cost, cfg, state)) || undefined;
     }
     done++;
     inp.onProgress(32 + Math.round((done / scenes.length) * 33), say(`Visuals ${done}/${scenes.length}`, `Кадры ${done}/${scenes.length}`));
   });
+  await fillMissingMedia(scenes, workDir);
 
-  await assembleVideo({ scenes, words, duration, audioFile, workDir, outVideo: inp.outVideo, outPoster: inp.outPoster, cost, onProgress: inp.onProgress, ru, sceneFrames, ranges });
+  await assembleVideo({ scenes, words, duration, audioFile, workDir, outVideo: inp.outVideo, outPoster: inp.outPoster, cost, onProgress: inp.onProgress, ru, sceneFrames, ranges, style: inp.style, maxOverlays: cfg.maxOverlays });
   try { fs.copyFileSync(audioFile, prevAudio); } catch { /* ignore */ }
 
   scenes.forEach((s, i) => { s.text = s.headline?.phrase || s.voiceover_chunk.split(/\s+/).slice(0, 6).join(' '); (s as any).duration = +(boundaries[i + 1] - boundaries[i]).toFixed(2); });
-  return { title: script.title, scenes, full_script: fullScript, words, audioFile, duration };
+  return { title: script.title, scenes, full_script: fullScript, words, audioFile, duration, ranges, sceneFrames };
 }
 
 export interface AssembleInput {
   scenes: SceneSpec[]; words: Word[]; duration: number; audioFile: string; workDir: string;
   outVideo: string; outPoster: string; cost: CostTracker; onProgress: (pct: number, msg: string) => void; ru: boolean;
-  sceneFrames: number[]; ranges: { from: number; to: number }[];
+  sceneFrames: number[]; ranges: { from: number; to: number }[]; style?: CaptionStyle; maxOverlays?: number; extraOverlays?: OverlayItem[];
+}
+
+export interface OverlayItem { file: string; start: number; end: number; mode: 'sticker' | 'card' | 'fullscreen' }
+
+/** Render (or reuse from cache) the clip for one scene. */
+export async function sceneClip(media: NonNullable<SceneSpec['media']>, i: number, frames: number, workDir: string): Promise<string | null> {
+  const dir = path.join(workDir, 'clips');
+  fs.mkdirSync(dir, { recursive: true });
+  let mt = 0;
+  try { mt = fs.statSync(media.file).mtimeMs; } catch { return null; }
+  const key = crypto.createHash('md5').update(`${media.file}|${mt}|${frames}|${i % 5}|${W}x${H}`).digest('hex').slice(0, 16);
+  const out = path.join(dir, `${key}.mp4`);
+  if (fs.existsSync(out) && fs.statSync(out).size > 1000) return out;
+  const ok = await renderSceneClip(media, i, frames, out);
+  return ok ? out : null;
+}
+
+export function headlineIndexes(scenes: SceneSpec[], words: Word[], ranges: { from: number; to: number }[]) {
+  const headlines: { start_idx: number; end_idx: number; highlight_idx: number }[] = [];
+  scenes.forEach((s, i) => {
+    const r = ranges[i];
+    if (s.headline && r) {
+      const st = findPhrase(words, r.from, r.to, s.headline.phrase);
+      if (st >= 0) {
+        const len = s.headline.phrase.split(/\s+/).filter(Boolean).length;
+        const en = st + len - 1;
+        headlines.push({ start_idx: st, end_idx: en, highlight_idx: findWord(words, st, en, s.headline.highlight) });
+      }
+    }
+  });
+  return headlines;
+}
+
+/** Overlay timing next to its trigger word, never colliding with a headline caption. */
+export function overlayWindow(words: Word[], wi: number, duration: number, headlines: { start_idx: number; end_idx: number }[], len = 2.8) {
+  let start = Math.max(0, (words[wi]?.start ?? 0) - 0.1);
+  let end = Math.min(duration - 0.05, start + len);
+  for (const h of headlines) {
+    const hs = words[h.start_idx].start; const he = words[h.end_idx].end + 0.9;
+    if (start < he && end > hs) { start = he; end = Math.min(duration - 0.05, start + len - 0.2); }
+  }
+  return end - start < 1.4 ? null : { start, end };
+}
+
+export async function buildAss(workDir: string, words: Word[], duration: number, headlines: any[], style?: CaptionStyle): Promise<string> {
+  const spec = path.join(workDir, `subs_spec_${Date.now()}.json`);
+  const ass = path.join(workDir, `subs_${Date.now()}.ass`);
+  fs.writeFileSync(spec, JSON.stringify({ width: W, height: H, duration, words, headlines, style: styleSpec(style || {}) }));
+  const ar = await run(pyBin(), [HELPER, 'ass', spec, ass], { timeoutMs: 120000 });
+  if (ar.code !== 0) throw new Error('subtitle build failed: ' + ar.err.slice(-300));
+  return ass;
 }
 
 /** Steps 4-7: headline/overlay timing, overlay elements, scene clips, subtitles, final mux. */
 export async function assembleVideo(a: AssembleInput): Promise<void> {
   const { scenes, words, duration, audioFile, workDir, cost, sceneFrames, ranges } = a;
-  const inp = { outVideo: a.outVideo, outPoster: a.outPoster, onProgress: a.onProgress };
   const say = (en: string, r: string) => (a.ru ? r : en);
-  // 4. headlines + overlays timing
-  const headlines: { start_idx: number; end_idx: number; highlight_idx: number }[] = [];
-  const overlays: { file: string; start: number; end: number }[] = [];
-  scenes.forEach((s, i) => {
-    const r = ranges[i];
-    if (s.headline) {
-      const st = findPhrase(words!, r.from, r.to, s.headline.phrase);
-      if (st >= 0) {
-        const len = s.headline.phrase.split(/\s+/).filter(Boolean).length;
-        const en = st + len - 1;
-        const hi = findWord(words!, st, en, s.headline.highlight);
-        headlines.push({ start_idx: st, end_idx: en, highlight_idx: hi });
-      }
-    }
-  });
-  inp.onProgress(68, say('Creating animated elements...', 'Создаём анимированные элементы...'));
-  const overlayJobs = scenes.map((s, i) => ({ s, i })).filter((x) => x.s.overlay).slice(0, 3);
+  const headlines = headlineIndexes(scenes, words, ranges);
+  a.onProgress(68, say('Creating animated elements...', 'Создаём анимированные элементы...'));
+  const overlays: OverlayItem[] = [];
+  const overlayJobs = scenes.map((s, i) => ({ s, i })).filter((x) => x.s.overlay).slice(0, a.maxOverlays ?? 3);
   await mapLimit(overlayJobs, 2, async ({ s, i }) => {
     const r = ranges[i];
-    let wi = findWord(words!, r.from, r.to, s.overlay!.trigger_word);
+    let wi = findWord(words, r.from, r.to, s.overlay!.trigger_word);
     if (wi < 0) wi = r.from;
-    let start = Math.max(0, words![wi].start - 0.1);
-    let end = Math.min(duration - 0.05, start + 2.8);
-    // never collide with a headline caption
-    for (const h of headlines) {
-      const hs = words![h.start_idx].start; const he = words![h.end_idx].end + 0.9;
-      if (start < he && end > hs) { start = he; end = Math.min(duration - 0.05, start + 2.6); }
-    }
-    if (end - start < 1.6) return;
-    const file = await makeOverlayElement(s.overlay!.element, workDir, cost);
-    if (file) overlays.push({ file, start, end });
+    const win = overlayWindow(words, wi, duration, headlines);
+    if (!win) return;
+    const file = (s.overlay as any).file && fs.existsSync((s.overlay as any).file) ? (s.overlay as any).file : await makeOverlayElement(s.overlay!.element, workDir, cost);
+    if (file) { (s.overlay as any).file = file; overlays.push({ file, ...win, mode: 'sticker' }); }
   });
 
-  // 5. render scene clips
-  inp.onProgress(74, say('Editing the video...', 'Монтируем видео...'));
+  overlays.push(...(a.extraOverlays || []));
+  // 5. render scene clips (cached: unchanged scenes are not re-encoded on edits)
+  a.onProgress(74, say('Editing the video...', 'Монтируем видео...'));
   const clips: string[] = [];
   for (let i = 0; i < scenes.length; i++) {
-    const out = path.join(workDir, `clip_${i}.mp4`);
-    let ok = await renderSceneClip(scenes[i].media!, i, sceneFrames[i], out);
-    if (!ok && scenes[i].media!.kind === 'video') {
-      // broken video download -> AI photo instead
-      const f = path.join(workDir, `scene_${i}_${Date.now()}.png`);
-      if (await generateRealPhoto(scenes[i].ai_image_prompt, f, cost, `photo scene ${i + 1} (retry)`)) {
-        scenes[i].media = { kind: 'photo', source: 'ai', file: f };
-        ok = await renderSceneClip(scenes[i].media!, i, sceneFrames[i], out);
-      }
+    let out = await sceneClip(scenes[i].media!, i, sceneFrames[i], workDir);
+    if (!out) {
+      // broken media -> borrow another scene's visual instead of failing / showing grey
+      const alt = scenes.find((x, j) => j !== i && x.media && fs.existsSync(x.media.file));
+      if (alt) { scenes[i].media = { ...alt.media!, source: alt.media!.source + ':reused' }; out = await sceneClip(scenes[i].media!, i, sceneFrames[i], workDir); }
     }
-    if (!ok) throw new Error(`Failed to render scene ${i + 1}`);
+    if (!out) throw new Error(`Failed to render scene ${i + 1}`);
     clips.push(out);
-    inp.onProgress(74 + Math.round(((i + 1) / scenes.length) * 12), say(`Editing ${i + 1}/${scenes.length}`, `Монтаж ${i + 1}/${scenes.length}`));
+    a.onProgress(74 + Math.round(((i + 1) / scenes.length) * 12), say(`Editing ${i + 1}/${scenes.length}`, `Монтаж ${i + 1}/${scenes.length}`));
   }
   const list = path.join(workDir, 'concat.txt');
   fs.writeFileSync(list, clips.map((c) => `file '${c}'`).join('\n'));
@@ -740,41 +865,50 @@ export async function assembleVideo(a: AssembleInput): Promise<void> {
   const cr = await ffmpeg(['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', merged]);
   if (cr.code !== 0) throw new Error('concat failed: ' + cr.err.slice(-200));
 
-  // 6. subtitles (ASS)
-  const spec = path.join(workDir, 'subs_spec.json');
-  const ass = path.join(workDir, 'subs.ass');
-  fs.writeFileSync(spec, JSON.stringify({ width: W, height: H, duration, words, headlines }));
-  const ar = await run(pyBin(), [HELPER, 'ass', spec, ass], { timeoutMs: 120000 });
-  if (ar.code !== 0) throw new Error('subtitle build failed: ' + ar.err.slice(-300));
+  const ass = await buildAss(workDir, words, duration, headlines, a.style);
+  a.onProgress(90, say('Adding subtitles and effects...', 'Добавляем субтитры и эффекты...'));
+  await composeFinal({ baseVideo: merged, overlays, assFile: ass, audioFile, duration, outVideo: a.outVideo, outPoster: a.outPoster });
+}
 
-  // 7. final composition: overlays (eased rise from bottom to centre, then slide back down) + subtitles + audio
-  inp.onProgress(90, say('Adding subtitles and effects...', 'Добавляем субтитры и эффекты...'));
-  const args: string[] = ['-i', merged];
-  overlays.forEach((o) => args.push('-loop', '1', '-t', duration.toFixed(2), '-i', o.file));
-  args.push('-i', audioFile);
+/** Final composition: overlays (eased rise / fullscreen inserts) + subtitles + audio. */
+export async function composeFinal(c: { baseVideo: string; overlays: OverlayItem[]; assFile: string; audioFile: string; duration: number; outVideo: string; outPoster: string }) {
+  const { overlays, duration } = c;
+  const args: string[] = ['-i', c.baseVideo];
+  overlays.forEach((o) => {
+    if (o.mode === 'fullscreen' && /\.(mp4|webm|mov)$/i.test(o.file)) args.push('-i', o.file);
+    else args.push('-loop', '1', '-t', duration.toFixed(2), '-i', o.file);
+  });
+  args.push('-i', c.audioFile);
   const audioIdx = overlays.length + 1;
   const fc: string[] = [];
   let last = '[0:v]';
   const RISE = 0.75;
-  overlays.forEach((o, k) => {
+  // fullscreen inserts first (under stickers/cards)
+  const order = overlays.map((o, k) => ({ o, k })).sort((x, y) => (x.o.mode === 'fullscreen' ? 0 : 1) - (y.o.mode === 'fullscreen' ? 0 : 1));
+  order.forEach(({ o, k }) => {
     const A = o.start.toFixed(3), B = o.end.toFixed(3);
-    fc.push(`[${k + 1}:v]scale=w='min(330,iw)':h=-1,format=rgba[ov${k}]`);
-    const pin = `clip((t-${A})/${RISE},0,1)`;
-    const pout = `clip((t-(${B}-${RISE}))/${RISE},0,1)`;
-    const target = `(H*0.47-h/2)`;
-    // eased: cubic ease-out on the way up, cubic ease-in on the way down
-    const y = `${target}+(H-${target})*(pow(1-${pin},3)+pow(${pout},3))`;
-    fc.push(`${last}[ov${k}]overlay=x='(W-w)/2':y='${y}':enable='between(t,${A},${B})':eval=frame[v${k}]`);
+    if (o.mode === 'fullscreen') {
+      const isVid = /\.(mp4|webm|mov)$/i.test(o.file);
+      fc.push(`[${k + 1}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,fps=${FPS},format=yuva420p,` +
+        `${isVid ? `setpts=PTS-STARTPTS+${A}/TB,` : ''}fade=t=in:st=${A}:d=0.2:alpha=1,fade=t=out:st=${(o.end - 0.2).toFixed(3)}:d=0.2:alpha=1[ov${k}]`);
+      fc.push(`${last}[ov${k}]overlay=0:0:enable='between(t,${A},${B})':eof_action=pass[v${k}]`);
+    } else {
+      const maxW = o.mode === 'card' ? 540 : 330;
+      fc.push(`[${k + 1}:v]scale=w='min(${maxW},iw)':h=-1,format=rgba[ov${k}]`);
+      const pin = `clip((t-${A})/${RISE},0,1)`;
+      const pout = `clip((t-(${B}-${RISE}))/${RISE},0,1)`;
+      const target = o.mode === 'card' ? `(H*0.40-h/2)` : `(H*0.47-h/2)`;
+      const y = `${target}+(H-${target})*(pow(1-${pin},3)+pow(${pout},3))`;
+      fc.push(`${last}[ov${k}]overlay=x='(W-w)/2':y='${y}':enable='between(t,${A},${B})':eval=frame[v${k}]`);
+    }
     last = `[v${k}]`;
   });
   const esc = (p: string) => p.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
-  fc.push(`${last}subtitles=filename='${esc(ass)}':fontsdir='${esc(FONT_DIR)}'[vout]`);
+  fc.push(`${last}subtitles=filename='${esc(c.assFile)}':fontsdir='${esc(FONT_DIR)}'[vout]`);
   args.push('-filter_complex', fc.join(';'), '-map', '[vout]', '-map', `${audioIdx}:a`,
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', String(FPS),
-    '-c:a', 'aac', '-b:a', '192k', '-t', duration.toFixed(3), '-movflags', '+faststart', inp.outVideo);
+    '-c:a', 'aac', '-b:a', '192k', '-t', duration.toFixed(3), '-movflags', '+faststart', c.outVideo);
   const fr = await ffmpeg(args, 20 * 60 * 1000);
-  if (fr.code !== 0 || !fs.existsSync(inp.outVideo)) throw new Error('final render failed: ' + fr.err.slice(-400));
-
-  await ffmpeg(['-ss', Math.min(1, duration / 2).toFixed(2), '-i', inp.outVideo, '-frames:v', '1', '-q:v', '3', inp.outPoster]);
-
+  if (fr.code !== 0 || !fs.existsSync(c.outVideo)) throw new Error('final render failed: ' + fr.err.slice(-400));
+  await ffmpeg(['-ss', Math.min(1, duration / 2).toFixed(2), '-i', c.outVideo, '-frames:v', '1', '-q:v', '3', c.outPoster]);
 }

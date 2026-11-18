@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { X, Download, ArrowUp, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
+import AttachmentThumb from "../components/custom/AttachmentThumb";
 import { useAppLanguage } from "../utils/translations";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -384,6 +385,11 @@ export const VideoPage = () => {
               />
             </div>
           )}
+          {isCompleted && !isProcessing && Array.isArray(project?.edit_notes) && project.edit_notes.length > 0 && (
+            <div className="video-edit-notes" data-testid="edit-notes">
+              {project.edit_notes.map((n, i) => <p key={i}>{n}</p>)}
+            </div>
+          )}
         </div>
 
         {/* Edit prompt input area — visually IDENTICAL to MainPage */}
@@ -394,23 +400,7 @@ export const VideoPage = () => {
               <div className="attachments-row">
                 {attachments.map((attachment) => (
                   <div key={attachment.id} className="attachment-item rounded-[16px] overflow-hidden">
-                    {attachment.uploading ? (
-                      <div className="attachment-uploading rounded-[16px] overflow-hidden">
-                        <div
-                          className="attachment-preview-blur rounded-[16px]"
-                          style={{ backgroundImage: `url(${attachment.preview})` }}
-                        />
-                        <span className="upload-progress">
-                          {Math.round(attachment.progress || 0)}%
-                        </span>
-                      </div>
-                    ) : (
-                      <img
-                        src={attachment.preview}
-                        alt="Attachment"
-                        className="attachment-preview rounded-[16px]"
-                      />
-                    )}
+                    <AttachmentThumb attachment={attachment} />
                     <button
                       className="attachment-remove"
                       onClick={() => removeAttachment(attachment.id)}
