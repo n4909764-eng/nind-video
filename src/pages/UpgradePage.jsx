@@ -2,6 +2,9 @@ import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { X, ChevronDown, Check, ChevronRight } from "lucide-react";
 import { useAppLanguage } from "../utils/translations";
+import { toast } from "sonner";
+
+const API = `${process.env.REACT_APP_BACKEND_URL || ""}/api`;
 
 // Credits icon (exact same as in Profile page)
 const CreditsIcon = ({ className, color = "currentColor" }) => (
@@ -153,6 +156,29 @@ const UpgradePage = () => {
   const [proCredits, setProCredits] = useState(3000);
   const [proCreditsOpen, setProCreditsOpen] = useState(false);
   const [openFaqId, setOpenFaqId] = useState(null);
+  const [checkoutLoading, setCheckoutLoading] = useState(null);
+
+  // Opens the Whop checkout for the chosen plan; the server attaches the user id as checkout metadata.
+  const startCheckout = async (planKey) => {
+    let user = null;
+    try { user = JSON.parse(localStorage.getItem("slind_user") || "null"); } catch (_) { /* ignore */ }
+    const userId = user?.user_id || user?.id;
+    if (!userId) { navigate("/auth"); return; }
+    setCheckoutLoading(planKey);
+    try {
+      const res = await fetch(`${API}/subscription/checkout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: userId, tier: planKey === "pro" ? "creator" : "starter", credits: planKey === "pro" ? proCredits : 500, cycle: billingCycle }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.url) throw new Error(data.message || "checkout_failed");
+      window.location.href = data.url;
+    } catch (e) {
+      toast.error("Could not open checkout. Please try again.");
+      setCheckoutLoading(null);
+    }
+  };
 
   const reviewsScrollerRef = useRef(null);
   const isDraggingReviews = useRef(false);
@@ -358,7 +384,7 @@ const UpgradePage = () => {
           </div>
 
           {/* Subscribe Button */}
-          <button className="pricing-subscribe-btn">{t("upgrade")}</button>
+          <button className="pricing-subscribe-btn" onClick={() => startCheckout(planKey)} disabled={!!checkoutLoading} data-testid={`subscribe-${planKey}`}>{t("upgrade")}</button>
         </div>
 
         <div className="pricing-card-bottom">

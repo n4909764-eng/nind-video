@@ -25,42 +25,37 @@ export const SubscriptionSuccessPage = () => {
   
   const [status, setStatus] = useState("checking");
   const [paymentData, setPaymentData] = useState(null);
-  const [pollAttempts, setPollAttempts] = useState(0);
   const stars = useMemo(() => generateStars(100), []);
 
   useEffect(() => {
-    if (sessionId) {
-      pollPaymentStatus();
-    } else {
-      setStatus("error");
-    }
-  }, [sessionId]);
-
-  const pollPaymentStatus = async () => {
-    if (pollAttempts >= 5) {
-      setStatus("timeout");
-      return;
-    }
-
-    try {
-      const response = await axios.get(`${API}/subscription/status/${sessionId}`);
-      const data = response.data;
-      
-      if (data.payment_status === "paid") {
-        setStatus("success");
-        setPaymentData(data);
-      } else if (data.status === "expired") {
-        setStatus("expired");
-      } else {
-        // Continue polling
-        setPollAttempts(prev => prev + 1);
-        setTimeout(pollPaymentStatus, 2000);
+    if (!sessionId) { setStatus("error"); return; }
+    let cancelled = false;
+    let attempt = 0;
+    // The subscription is activated by the Whop webhook, which can take a few seconds.
+    const poll = async () => {
+      if (cancelled) return;
+      if (attempt++ >= 30) { setStatus("timeout"); return; }
+      try {
+        const { data } = await axios.get(`${API}/subscription/status/${sessionId}`);
+        if (data.payment_status === "paid") {
+          setStatus("success");
+          setPaymentData(data);
+          try {
+            const u = JSON.parse(localStorage.getItem("slind_user") || "null");
+            if (u) localStorage.setItem("slind_user", JSON.stringify({ ...u, credits: data.credits ?? u.credits, subscription_status: "active" }));
+          } catch (_) { /* ignore */ }
+          return;
+        }
+        if (data.status === "expired") { setStatus("expired"); return; }
+        setTimeout(poll, 2000);
+      } catch (error) {
+        console.error("Error checking payment status:", error);
+        setStatus("error");
       }
-    } catch (error) {
-      console.error("Error checking payment status:", error);
-      setStatus("error");
-    }
-  };
+    };
+    poll();
+    return () => { cancelled = true; };
+  }, [sessionId]);
 
   return (
     <div className="min-h-screen bg-black relative overflow-hidden flex items-center justify-center" data-testid="subscription-success-page">
@@ -87,9 +82,9 @@ export const SubscriptionSuccessPage = () => {
       <div className="relative z-10 text-center px-4 max-w-md mx-auto">
         {status === "checking" && (
           <>
-            <Loader2 className="w-16 h-16 mx-auto mb-6 text-purple-400 animate-spin" />
-            <h1 className="text-2xl font-bold mb-2">Проверяем оплату...</h1>
-            <p className="text-white/60">Пожалуйста, подождите</p>
+            <Loader2 className="w-16 h-16 mx-auto mb-6 text-white/80 animate-spin" />
+            <h1 className="text-2xl font-bold mb-2">Confirming your payment...</h1>
+            <p className="text-white/60">Please wait a moment</p>
           </>
         )}
 
@@ -98,21 +93,21 @@ export const SubscriptionSuccessPage = () => {
             <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-green-500/20 flex items-center justify-center">
               <CheckCircle className="w-12 h-12 text-green-400" />
             </div>
-            <h1 className="text-3xl font-bold mb-2">Оплата успешна!</h1>
+            <h1 className="text-3xl font-bold mb-2">Payment successful!</h1>
             <p className="text-white/60 mb-6">
-              Ваша подписка активирована. Спасибо за покупку!
+              Your subscription is active and the credits are on your balance.
             </p>
-            {paymentData?.metadata?.plan_name && (
+            {false && (
               <p className="text-purple-400 font-semibold mb-6">
                 План: {paymentData.metadata.plan_name}
               </p>
             )}
             <button
-              onClick={() => navigate("/create")}
-              className="px-8 py-3 rounded-xl bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold hover:from-purple-600 hover:to-pink-600 transition-all"
+              onClick={() => navigate("/")}
+              className="px-8 py-3 rounded-xl bg-white text-black font-semibold hover:bg-white/90 transition-all"
               data-testid="start-creating-btn"
             >
-              Начать создавать
+              Start creating
             </button>
           </>
         )}
@@ -122,15 +117,15 @@ export const SubscriptionSuccessPage = () => {
             <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-yellow-500/20 flex items-center justify-center">
               <Sparkles className="w-12 h-12 text-yellow-400" />
             </div>
-            <h1 className="text-2xl font-bold mb-2">Обработка платежа</h1>
+            <h1 className="text-2xl font-bold mb-2">Payment is processing</h1>
             <p className="text-white/60 mb-6">
-              Платёж обрабатывается. Проверьте email для подтверждения.
+              Your payment is still being processed. Credits will appear on your balance shortly.
             </p>
             <button
               onClick={() => navigate("/")}
               className="px-8 py-3 rounded-xl glass-ios text-white font-semibold hover:bg-white/10 transition-all"
             >
-              На главную
+              Back to home
             </button>
           </>
         )}
@@ -141,18 +136,18 @@ export const SubscriptionSuccessPage = () => {
               <ArrowLeft className="w-12 h-12 text-red-400" />
             </div>
             <h1 className="text-2xl font-bold mb-2">
-              {status === "expired" ? "Сессия истекла" : "Ошибка"}
+              {status === "expired" ? "Session expired" : "Something went wrong"}
             </h1>
             <p className="text-white/60 mb-6">
               {status === "expired" 
-                ? "Платёжная сессия истекла. Пожалуйста, попробуйте снова." 
-                : "Произошла ошибка при проверке оплаты."}
+                ? "The checkout session expired. Please try again." 
+                : "We could not confirm the payment yet. If you were charged, credits will appear shortly."}
             </p>
             <button
-              onClick={() => navigate("/pricing")}
+              onClick={() => navigate("/upgrade")}
               className="px-8 py-3 rounded-xl glass-ios text-white font-semibold hover:bg-white/10 transition-all"
             >
-              Вернуться к тарифам
+              Back to plans
             </button>
           </>
         )}

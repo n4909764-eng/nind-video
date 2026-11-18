@@ -38,5 +38,30 @@ $0.01 of real API cost = 1 credit, charged after the job; each job has a spendin
 | `WHISPER_MODEL` | `base` | |
 | `WELCOME_CREDITS` | 20 | |
 | `MIN_GENERATION_CREDITS` / `MIN_EDIT_CREDITS` | 10 / 3 | |
-| `WHOP_TOPUP_CHECKOUT_URL` | – | top-up checkout (TODO: real Whop integration in `/api/topup`) |
+| `WHOP_API_KEY` | – | Whop company API key (checkout links with the user id in metadata) |
+| `WHOP_WEBHOOK_SECRET` | – | signing secret (`ws_…`) of the Whop webhook |
+| `PUBLIC_URL` | request host | e.g. `https://nind.pro`, used for the post-checkout redirect |
+| `WHOP_PLAN_*` | built-in ids | optional plan id overrides (see `.env.example`) |
+| `WHOP_TOPUP_CHECKOUT_URL` | – | top-up checkout (TODO: Top Up prices not set yet; `/api/topup` is a stub) |
 | `PORT` | 3000 | |
+
+## Subscriptions (Whop)
+
+Whop business **nind ai** (`biz_Vu32WsCrgz7wrb`), product **nind ai** (`prod_J9aUbijk5FI0G`). Plans (USD, from the Upgrade page; annual = monthly-equivalent annual price × 12, billed yearly):
+
+| plan | credits / month | monthly | annual |
+|---|---|---|---|
+| Starter | 500 | $20 `plan_PEoFZUohfP7EQ` | $192 `plan_qhQsIcxcgw0K7` |
+| Creator | 3000 | $69 `plan_TZOKWqftoUoDz` | $708 `plan_SbX1qP2M1PTDU` |
+| Creator | 6000 | $119 `plan_8vgWPQY7cWOQB` | $1188 `plan_O1UuonQls7oeJ` |
+| Creator | 9000 | $199 `plan_YCo3Tg5Bfz1gx` | $2028 `plan_xWkQKn3P9WH0Y` |
+
+Flow: Upgrade → `POST /api/subscription/checkout` creates a Whop checkout configuration with metadata `{ nind_user_id, nind_plan }` (needs `WHOP_API_KEY`; without it the plain plan link is used and the buyer is matched by e-mail) → Whop checkout → redirect to `/subscription/success?session_id=…`, which polls `/api/subscription/status/:id`.
+
+Webhook `POST /api/webhooks/whop` (Standard Webhooks signature with `WHOP_WEBHOOK_SECRET`, 5-minute timestamp tolerance, idempotent by `webhook-id` and payment id):
+- `payment.succeeded` → activates the plan and starts a new credit month: unused subscription credits expire, purchased/welcome credits stay, plan credits are added. Monthly renewals do this every month; annual plans are refilled monthly by a timer.
+- `membership.activated` / `membership.updated` → status sync (`past_due`, cancel at period end).
+- `membership.updated` with `canceled` / `expired` (or `membership.deactivated`) → back to Free, subscription credits removed.
+- Payments that can't be mapped to a user are kept in `db.whop_unmatched`.
+
+Register after deploy: Whop dashboard → Developer → Webhooks → URL `https://nind.pro/api/webhooks/whop`, events `payment.succeeded`, `membership.activated`, `membership.updated` (and `membership.deactivated` if offered), API version v1; put its secret into `WHOP_WEBHOOK_SECRET`.

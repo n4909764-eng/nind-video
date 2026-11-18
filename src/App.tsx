@@ -13,6 +13,7 @@ import VoiceAssistantPage from "@/pages/VoiceAssistantPage";
 import { initThemeFromStorage } from "@/components/custom/AppearancePopup";
 
 import HelpSupportPage from "@/pages/HelpSupportPage";
+import SubscriptionSuccessPage from "@/pages/SubscriptionSuccessPage";
 
 // Initialize theme from localStorage before render
 if (typeof window !== "undefined") {
@@ -35,6 +36,7 @@ function AppRouter() {
       <Route path="/video/:id" element={<VideoPage />} />
       <Route path="/formats" element={<FormatsPage />} />
       <Route path="/upgrade" element={<UpgradePage />} />
+      <Route path="/subscription/success" element={<SubscriptionSuccessPage />} />
       <Route path="/voice" element={<VoiceAssistantPage />} />
       <Route path="/help" element={<HelpSupportPage />} />
       <Route path="/support-chat" element={<HelpSupportPage />} />

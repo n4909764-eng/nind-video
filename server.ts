@@ -1,3 +1,4 @@
+import { PLANS, findPlan, planByVariant, createCheckout, verifyWebhook, pick, PlanDef } from './whop';
 import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -84,6 +85,17 @@ interface User {
   created_at: string;
   plan?: string;
   subscription_status?: string;
+  // Whop subscription state
+  plan_key?: string;            // e.g. creator3000_monthly
+  plan_credits?: number;        // credits per month of the plan
+  billing_cycle?: 'monthly' | 'annual';
+  sub_credits?: number;         // remaining credits of the current subscription month (expire at period end)
+  last_deposit?: number;
+  whop_membership_id?: string;
+  whop_user_id?: string;
+  next_credit_at?: string;      // annual plans: next monthly credit refill
+  period_end?: string;
+  cancel_at_period_end?: boolean;
 }
 
 interface Database {
@@ -91,6 +103,10 @@ interface Database {
   projects: Record<string, Project>;
   notifications: any[];
   chunk_uploads: Record<string, { total_chunks: number; chunks: Record<number, string>; filename: string }>;
+  whop_events?: Record<string, string>;      // webhook-id / event id -> processed at (idempotency)
+  whop_payments?: Record<string, string>;    // payment id -> user id (credits granted once per payment)
+  whop_checkouts?: Record<string, { user_id: string; plan_key: string; created_at: string }>;
+  whop_unmatched?: any[];                    // paid events we could not map to a user (manual review)
 }
 
 let db: Database = {
@@ -98,6 +114,10 @@ let db: Database = {
   projects: {},
   notifications: [],
   chunk_uploads: {},
+  whop_events: {},
+  whop_payments: {},
+  whop_checkouts: {},
+  whop_unmatched: [],
 };
 
 // Load database from disk
@@ -109,6 +129,10 @@ if (fs.existsSync(DB_FILE)) {
     if (!db.projects) db.projects = {};
     if (!db.notifications) db.notifications = [];
     if (!db.chunk_uploads) db.chunk_uploads = {};
+    if (!db.whop_events) db.whop_events = {};
+    if (!db.whop_payments) db.whop_payments = {};
+    if (!db.whop_checkouts) db.whop_checkouts = {};
+    if (!db.whop_unmatched) db.whop_unmatched = [];
   } catch (e) {
     console.error('Error loading db.json:', e);
   }
@@ -134,6 +158,9 @@ const storage = multer.diskStorage({
   },
 });
 const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } });
+
+// Whop webhook needs the raw body for signature verification -> registered before express.json
+app.post('/api/webhooks/whop', express.raw({ type: '*/*', limit: '2mb' }), (req: Request, res: Response) => handleWhopWebhook(req, res));
 
 // Middleware
 app.use(express.json({ limit: '100mb' }));
@@ -193,6 +220,7 @@ function chargeProject(project: Project, cost: CostTracker) {
   const user = project.user_id ? db.users[project.user_id] : undefined;
   if (user) {
     user.credits = Math.max(0, (user.credits || 0) - credits);
+    if (user.sub_credits) user.sub_credits = Math.max(0, Math.min(user.credits, user.sub_credits - credits));
   }
   console.log(`[CREDITS] ${project.id}: $${cost.usd.toFixed(4)} -> ${credits} credits; user ${project.user_id} balance ${user?.credits}`);
   saveDb();
@@ -968,12 +996,171 @@ app.get('/api/subscription/plans', (_req: Request, res: Response) => {
   });
 });
 
-app.post('/api/subscription/checkout', (req: Request, res: Response) => {
-  res.json({ url: '/subscription/success', session_id: `sub_${Date.now()}` });
+// ======================= SUBSCRIPTIONS (Whop) =======================
+function publicUrl(req: Request) {
+  const env = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+  if (env) return env;
+  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
+  return `${proto}://${req.headers['x-forwarded-host'] || req.headers.host}`;
+}
+
+/** New subscription month: unused subscription credits of the previous month expire, purchased/welcome credits stay. */
+function grantSubscriptionPeriod(user: User, plan: PlanDef) {
+  const extra = Math.max(0, (user.credits || 0) - (user.sub_credits || 0));
+  user.sub_credits = plan.credits;
+  user.credits = extra + plan.credits;
+  user.last_deposit = user.credits;
+  user.plan_credits = plan.credits;
+}
+
+function activateSubscription(user: User, plan: PlanDef, membershipId?: string | null) {
+  user.plan = plan.tier === 'starter' ? 'starter' : 'pro';
+  user.plan_key = plan.key;
+  user.billing_cycle = plan.cycle;
+  user.subscription_status = 'active';
+  user.cancel_at_period_end = false;
+  if (membershipId) user.whop_membership_id = membershipId;
+}
+
+function downgradeToFree(user: User, reason: string) {
+  user.credits = Math.max(0, (user.credits || 0) - (user.sub_credits || 0));
+  user.sub_credits = 0;
+  user.plan = 'free';
+  user.subscription_status = reason;
+  user.plan_key = undefined;
+  user.plan_credits = undefined;
+  user.next_credit_at = undefined;
+  user.cancel_at_period_end = false;
+}
+
+function findWhopUser(d: any): User | undefined {
+  const meta = pick.meta(d);
+  const uid = meta.nind_user_id || meta.user_id;
+  if (uid && db.users[uid]) return db.users[uid];
+  const mem = pick.membership(d);
+  if (mem) { const u = Object.values(db.users).find((x) => x.whop_membership_id === mem); if (u) return u; }
+  const email = pick.email(d);
+  if (email) {
+    const matches = Object.values(db.users).filter((x) => (x.email || '').toLowerCase() === email);
+    if (matches.length === 1) return matches[0];
+  }
+  return undefined;
+}
+
+const DAY = 86400000;
+
+/** Processes a verified Whop event. Returns a short status string (for logs/tests). */
+function processWhopEvent(evt: any): string {
+  const type = String(evt?.type || '');
+  const d = evt?.data || {};
+  if (type === 'payment.succeeded') {
+    const payId = String(d.id || '');
+    if (payId && db.whop_payments![payId]) return 'duplicate_payment';
+    const plan = planByVariant(pick.variant(d)) || PLANS.find((p) => p.key === pick.meta(d).nind_plan);
+    if (!plan) return 'ignored_unknown_plan';
+    const user = findWhopUser(d);
+    if (!user) { db.whop_unmatched!.push({ at: new Date().toISOString(), type, payment: payId, variant: plan.variantId, email: pick.email(d) }); return 'unmatched_user'; }
+    activateSubscription(user, plan, pick.membership(d));
+    if (d.user_id || d.user?.id) user.whop_user_id = d.user_id || d.user?.id;
+    grantSubscriptionPeriod(user, plan);
+    const now = Date.now();
+    user.next_credit_at = plan.cycle === 'annual' ? new Date(now + 30 * DAY).toISOString() : undefined;
+    user.period_end = new Date(now + (plan.cycle === 'annual' ? 365 : 30) * DAY).toISOString();
+    if (payId) db.whop_payments![payId] = user.user_id;
+    console.log(`[whop] ${payId} -> ${user.user_id} ${plan.key} (+${plan.credits} credits, reason ${d.billing_reason || '-'})`);
+    return 'granted';
+  }
+  if (type.startsWith('membership.')) {
+    const user = findWhopUser(d);
+    if (!user) return 'unmatched_user';
+    const mem = pick.membership(d);
+    if (user.whop_membership_id && mem && user.whop_membership_id !== mem && type !== 'membership.activated') return 'other_membership';
+    const status = String(d.status || '');
+    if (type === 'membership.activated' || status === 'active' || status === 'trialing') {
+      const plan = planByVariant(pick.variant(d));
+      if (plan && user.plan_key !== plan.key && type === 'membership.activated') activateSubscription(user, plan, mem); // credits come with payment.succeeded
+      else if (mem) user.whop_membership_id = mem;
+      if (status === 'active' || type === 'membership.activated') user.subscription_status = 'active';
+      user.cancel_at_period_end = !!d.cancel_at_period_end;
+      if (d.renewal_period_end) user.period_end = new Date(typeof d.renewal_period_end === 'number' ? d.renewal_period_end * 1000 : d.renewal_period_end).toISOString();
+      return 'active';
+    }
+    if (status === 'past_due') { user.subscription_status = 'past_due'; return 'past_due'; }
+    if (type === 'membership.deactivated' || ['canceled', 'expired', 'completed', 'unresolved'].includes(status)) {
+      downgradeToFree(user, status || 'canceled');
+      return 'downgraded';
+    }
+    return 'noop';
+  }
+  return 'ignored';
+}
+
+function handleWhopWebhook(req: Request, res: Response) {
+  const raw: Buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {}));
+  const secret = process.env.WHOP_WEBHOOK_SECRET || '';
+  if (!secret) return res.status(503).json({ error: 'webhook_not_configured' });
+  if (!verifyWebhook(raw, req.headers as any, secret)) return res.status(401).json({ error: 'invalid_signature' });
+  let evt: any;
+  try { evt = JSON.parse(raw.toString('utf8')); } catch { return res.status(400).json({ error: 'invalid_json' }); }
+  const eventId = String(req.headers['webhook-id'] || evt.id || '');
+  if (eventId && db.whop_events![eventId]) return res.json({ ok: true, result: 'duplicate_event' });
+  let result = 'error';
+  try { result = processWhopEvent(evt); } catch (e: any) { console.error('[whop] webhook error', e?.message); return res.status(500).json({ error: 'processing_failed' }); }
+  if (eventId) db.whop_events![eventId] = new Date().toISOString();
+  saveDb();
+  res.json({ ok: true, result });
+}
+
+// Annual plans pay once a year but credits are issued monthly.
+function refillAnnualCredits() {
+  const now = Date.now();
+  let changed = false;
+  for (const u of Object.values(db.users)) {
+    if (u.billing_cycle !== 'annual' || u.subscription_status !== 'active' || !u.plan_key || !u.next_credit_at) continue;
+    if (Date.parse(u.next_credit_at) > now) continue;
+    if (u.period_end && Date.parse(u.period_end) <= now) continue; // the yearly renewal payment refills instead
+    const plan = PLANS.find((p) => p.key === u.plan_key);
+    if (!plan) continue;
+    grantSubscriptionPeriod(u, plan);
+    u.next_credit_at = new Date(Date.parse(u.next_credit_at) + 30 * DAY).toISOString();
+    changed = true;
+    console.log(`[whop] annual monthly refill ${u.user_id} +${plan.credits}`);
+  }
+  if (changed) saveDb();
+}
+setInterval(refillAnnualCredits, 60 * 60 * 1000).unref?.();
+setTimeout(refillAnnualCredits, 15000).unref?.();
+
+app.get('/api/subscription/plans', (_req: Request, res: Response) => {
+  res.json({ plans: PLANS.map(({ key, tier, name, credits, cycle, price }) => ({ key, tier, name, credits, cycle, price })) });
+});
+
+// Body: { user_id, tier: 'starter'|'creator', credits?: 3000|6000|9000, cycle: 'monthly'|'annually' }
+app.post('/api/subscription/checkout', async (req: Request, res: Response) => {
+  const userId = (req.body?.user_id || req.headers['x-user-id']) as string;
+  const user = userId ? getOrCreateUser(userId) : undefined;
+  if (!user) return res.status(401).json({ error: 'Not signed in' });
+  const plan = findPlan(String(req.body?.tier || req.body?.plan || ''), Number(req.body?.credits), String(req.body?.cycle || 'monthly'));
+  if (!plan) return res.status(400).json({ error: 'unknown_plan' });
+  const sessionId = `chk_${crypto.randomBytes(8).toString('hex')}`;
+  try {
+    const co = await createCheckout(plan, user.user_id, `${publicUrl(req)}/subscription/success?session_id=${sessionId}`);
+    db.whop_checkouts![sessionId] = { user_id: user.user_id, plan_key: plan.key, created_at: new Date().toISOString() };
+    saveDb();
+    res.json({ url: co.url, session_id: sessionId, mode: co.mode, plan: plan.key });
+  } catch (e: any) {
+    console.error('[whop] checkout error', e?.message);
+    res.status(502).json({ error: 'checkout_failed', message: 'Could not open checkout. Please try again.' });
+  }
 });
 
 app.get('/api/subscription/status/:sessionId', (req: Request, res: Response) => {
-  res.json({ status: 'active', plan: 'pro' });
+  const chk = db.whop_checkouts?.[req.params.sessionId];
+  if (!chk) return res.status(404).json({ status: 'unknown' });
+  const user = db.users[chk.user_id];
+  const paid = !!user && user.subscription_status === 'active' && user.plan_key === chk.plan_key;
+  const expired = !paid && Date.now() - Date.parse(chk.created_at) > 2 * DAY;
+  res.json({ status: paid ? 'active' : expired ? 'expired' : 'pending', payment_status: paid ? 'paid' : 'unpaid', plan: chk.plan_key, credits: user?.credits });
 });
 
 // Credit top-up (subscribers only). Creates a payment-provider checkout.
@@ -1016,7 +1203,7 @@ app.put('/api/users/:userId', (req: Request, res: Response) => {
     db.users[userId] = user;
   }
   // never let the client set its own balance / plan
-  const { credits: _c, plan: _p, subscription_status: _s, role: _r, user_id: _u, id: _i, ...safe } = req.body || {};
+  const { credits: _c, plan: _p, subscription_status: _s, role: _r, user_id: _u, id: _i, sub_credits: _sc, plan_key: _pk, plan_credits: _pc, billing_cycle: _bc, last_deposit: _ld, whop_membership_id: _wm, whop_user_id: _wu, next_credit_at: _nc, period_end: _pe, cancel_at_period_end: _cp, ...safe } = req.body || {};
   Object.assign(user, safe);
   saveDb();
   res.json({ user });
