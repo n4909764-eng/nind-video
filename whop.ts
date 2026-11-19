@@ -44,17 +44,17 @@ export async function createCheckout(plan: PlanDef, userId: string, redirectUrl:
   const link = `https://whop.com/checkout/${plan.variantId}`;
   if (!key) return { url: link, mode: 'link' };
   const metadata = { nind_user_id: userId, nind_plan: plan.key };
-  for (const idField of ['variant_id', 'plan_id']) {
-    const r = await fetch(`${API}/checkout_configurations`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ [idField]: plan.variantId, metadata, redirect_url: redirectUrl }),
-    });
-    const j: any = await r.json().catch(() => ({}));
-    if (r.ok && (j.purchase_url || j.id)) return { url: j.purchase_url || link, id: j.id, mode: 'api' };
-    console.warn(`[whop] checkout_configurations (${idField}) failed: ${r.status} ${String(j?.error?.message || j?.message || '').slice(0, 200)}`);
-    if (r.status === 401 || r.status === 403) break;
-  }
+  // Whop accepts only https redirect URLs (local http dev servers get Whop's default success page).
+  const body: any = { variant_id: plan.variantId, metadata };
+  if (/^https:\/\//.test(redirectUrl)) body.redirect_url = redirectUrl;
+  const r = await fetch(`${API}/checkout_configurations`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const j: any = await r.json().catch(() => ({}));
+  if (r.ok && j.purchase_url) return { url: j.purchase_url, id: j.id, mode: 'api' };
+  console.warn(`[whop] checkout_configurations failed: ${r.status} ${String(j?.error?.message || j?.message || '').slice(0, 200)}`);
   return { url: link, mode: 'link' };
 }
 
