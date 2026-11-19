@@ -200,9 +200,13 @@ export const VideoPage = () => {
             },
           });
           const uploadedUrl = uploadRes.data?.url || uploadRes.data?.file_url;
+          const rawThumb = uploadRes.data?.thumbnail_url;
+          const thumbnailUrl = rawThumb
+            ? (String(rawThumb).startsWith('http') ? rawThumb : `${BACKEND_URL || ''}${rawThumb}`)
+            : null;
           setAttachments((curr) =>
             curr.map((a) =>
-              a.id === attachId ? { ...a, uploading: false, progress: 100, uploadedUrl } : a
+              a.id === attachId ? { ...a, uploading: false, progress: 100, uploadedUrl, thumbnailUrl } : a
             )
           );
         } catch (err) {

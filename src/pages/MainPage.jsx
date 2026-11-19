@@ -1402,9 +1402,13 @@ export const MainPage = () => {
             },
           });
           const url = uploadRes?.data?.url;
+          const rawThumb = uploadRes?.data?.thumbnail_url;
+          const thumbnailUrl = rawThumb
+            ? (String(rawThumb).startsWith('http') ? rawThumb : `${BACKEND_URL || ''}${rawThumb}`)
+            : null;
           setAttachments(prev => prev.map(a =>
             a.id === id
-              ? { ...a, uploading: false, progress: 100, uploadedUrl: url }
+              ? { ...a, uploading: false, progress: 100, uploadedUrl: url, thumbnailUrl }
               : a
           ));
         } catch (err) {

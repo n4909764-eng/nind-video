@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import https from 'https';
 import dotenv from 'dotenv';
-import { runVideoPipeline, newCostTracker, CostTracker, levelCfg, normLevel, Level } from './videoPipeline';
+import { runVideoPipeline, newCostTracker, CostTracker, levelCfg, normLevel, Level, ffmpeg } from './videoPipeline';
 import { applyCreatedEdit, runSourceEdit, applySourceEdit, SourceState } from './editEngine';
 import { CaptionStyle } from './captionStyle';
 
@@ -158,6 +158,37 @@ const storage = multer.diskStorage({
   },
 });
 const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } });
+
+const VIDEO_EXT = /\.(mov|mp4|m4v|webm|mkv|avi|3gp|3g2|mts|m2ts|ts|mpeg|mpg|wmv|qt)$/i;
+
+function isVideoUpload(filename?: string, mime?: string) {
+  if (mime && mime.startsWith('video/')) return true;
+  return !!filename && VIDEO_EXT.test(filename);
+}
+
+/** Extract a small JPEG frame for the attachment preview (HEVC/.mov etc. that browsers can't decode). */
+async function makeUploadThumbnail(srcPath: string, originalName?: string, mime?: string): Promise<string | undefined> {
+  const name = originalName || path.basename(srcPath);
+  if (!isVideoUpload(name, mime)) return undefined;
+  const base = path.parse(path.basename(srcPath)).name;
+  const thumbName = `thumb_${base}.jpg`;
+  const thumbPath = path.join(UPLOADS_DIR, thumbName);
+  // Autorotate is on by default (honours iPhone display-matrix / rotate tags).
+  const vf = "scale='min(360,iw)':-2";
+  for (const ss of [0.5, 0]) {
+    try {
+      const r = await ffmpeg(['-ss', String(ss), '-i', srcPath, '-an', '-frames:v', '1', '-vf', vf, '-q:v', '3', thumbPath], 45_000);
+      if (r.code === 0 && fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 200) {
+        return `/api/uploads/${thumbName}`;
+      }
+    } catch (e) {
+      console.warn('thumbnail extract failed:', e);
+    }
+    try { if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath); } catch (_) {}
+  }
+  return undefined;
+}
+
 
 // Whop webhook needs the raw body for signature verification -> registered before express.json
 app.post('/api/webhooks/whop', express.raw({ type: '*/*', limit: '2mb' }), (req: Request, res: Response) => handleWhopWebhook(req, res));
@@ -808,16 +839,18 @@ app.delete('/api/videos/:id', (req: Request, res: Response) => {
 });
 
 // File Uploads
-app.post('/api/upload', upload.single('file'), (req: Request, res: Response) => {
+app.post('/api/upload', upload.single('file'), async (req: Request, res: Response) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
   const fileUrl = `/api/uploads/${req.file.filename}`;
+  const thumbnailUrl = await makeUploadThumbnail(req.file.path, req.file.originalname, req.file.mimetype);
   res.json({
     url: fileUrl,
     file_url: fileUrl,
     filename: req.file.filename,
     size: req.file.size,
+    ...(thumbnailUrl ? { thumbnail_url: thumbnailUrl } : {}),
   });
 });
 
@@ -868,7 +901,20 @@ app.post('/api/upload/complete', (req: Request, res: Response) => {
   saveDb();
 
   const fileUrl = `/api/uploads/${finalName}`;
-  writeStream.end(() => res.json({ url: fileUrl, file_url: fileUrl }));
+  writeStream.on('error', (err) => {
+    console.error('Failed to assemble chunked upload:', err);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to assemble upload' });
+  });
+  writeStream.end(async () => {
+    if (res.headersSent) return;
+    const thumbnailUrl = await makeUploadThumbnail(finalPath, session.filename);
+    res.json({
+      url: fileUrl,
+      file_url: fileUrl,
+      filename: finalName,
+      ...(thumbnailUrl ? { thumbnail_url: thumbnailUrl } : {}),
+    });
+  });
 });
 
 // Device Mockup Creation

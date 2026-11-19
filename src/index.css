@@ -9714,7 +9714,8 @@ body {
 
 /* ===================== Attachment thumbs (image + video) ===================== */
 .attachment-thumb-wrap { position: relative; width: 100%; height: 100%; }
-.attachment-thumb-wrap video.attachment-preview { display: block; background: #111; }
+.attachment-thumb-wrap video.attachment-preview,
+.attachment-thumb-wrap img.attachment-preview { display: block; background: #111; }
 .attachment-uploading-mask { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.45); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
 .attachment-video-badge { position: absolute; left: 6px; bottom: 6px; width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); color: #fff; }
 
