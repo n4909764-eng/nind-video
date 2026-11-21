@@ -6,7 +6,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { run, ffmpeg, pyBin, probeDuration, FPS } from './videoPipeline';
+import { run, ffmpeg, pyBin, probeDuration, FPS, withCleanOutput, stripProvenance } from './videoPipeline';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REFRAME_HELPER = path.resolve(__dirname, 'tools/reframe.py');
@@ -64,9 +64,10 @@ export async function smartReframe(src: string, outFile: string, workDir: string
   fs.writeFileSync(cmdFile, cmds.join('\n') + '\n');
   const esc = (p: string) => p.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
   const vf = `[0:v]setpts=PTS-STARTPTS,fps=${FPS},sendcmd=f='${esc(cmdFile)}',crop@rf=w=${cropW}:h=${pr.h}:x=${xs[0]}:y=0,scale=${out.w}:${out.h}:flags=lanczos,setsar=1[v]`;
-  const r = await ffmpeg(['-i', src, ...(maxSeconds ? ['-t', String(maxSeconds)] : []), '-filter_complex', vf, '-map', '[v]', '-an',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p', ...extraArgs, outFile], Math.max(10 * 60 * 1000, (maxSeconds || pr.duration) * 3000));
+  const r = await ffmpeg(withCleanOutput(['-i', src, ...(maxSeconds ? ['-t', String(maxSeconds)] : []), '-filter_complex', vf, '-map', '[v]', '-an',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p', ...extraArgs, outFile]), Math.max(10 * 60 * 1000, (maxSeconds || pr.duration) * 3000));
   if (r.code !== 0 || !fs.existsSync(outFile)) { console.warn('[reframe] render failed:', r.err.slice(-300)); return { ok: false, method: 'render-failed' }; }
+  await stripProvenance(outFile);
   const m = info.methods || {};
   const method = (m.face || 0) >= (m.person || 0) && (m.face || 0) > 0 ? 'face' : (m.person || 0) > 0 ? 'person' : (m.saliency || 0) > 0 ? 'saliency' : 'center';
   return { ok: true, method, samples: info.n, shots: info.shots, methods: m, cropW };

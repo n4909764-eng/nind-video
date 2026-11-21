@@ -11,6 +11,7 @@ import {
   orChat, extractJson, generateSpeech, alignWords, mediaForScene, fillMissingMedia, sceneTiming, assembleVideo,
   composeFinal, buildAss, makeOverlayElement, findPhrase, findWord, renderSceneClip, mapLimit, ffmpeg, run,
   probeDuration, pyBin, HELPER, W, H, FPS, runVideoPipeline, overlayWindow, EST, reserve, release,
+  withCleanOutput, stripProvenance,
   deriveSearchQuery, withFrame, frameFor, curFrame,
 } from './videoPipeline';
 import { probeVideo, smartReframe, ReframeResult } from './smartReframe';
@@ -58,9 +59,11 @@ async function makeCard(photo: string, workDir: string, square: boolean): Promis
   fs.mkdirSync(path.dirname(out), { recursive: true });
   if (fs.existsSync(out)) return out;
   const src = path.join(workDir, 'cards', `src_${Date.now()}.png`);
-  await ffmpeg(['-i', photo, '-frames:v', '1', src]); // normalise (webp/jpg/frames of video)
+  await ffmpeg(withCleanOutput(['-i', photo, '-frames:v', '1', src], { sei: false }));
+  if (fs.existsSync(src)) await stripProvenance(src);
   const r = await run(pyBin(), [HELPER, 'card', src, out, square ? '500' : '520', square ? '500' : '640', square ? '0' : '40', '6'], { timeoutMs: 60000 });
-  return r.code === 0 && fs.existsSync(out) ? out : null;
+  if (r.code === 0 && fs.existsSync(out)) { await stripProvenance(out); return out; }
+  return null;
 }
 
 /** Media for an insert/card: stock (relevance-checked) -> AI photo (within budget) -> null. */
@@ -75,7 +78,8 @@ async function insertMedia(spec: { media_type?: string; search_query?: string; v
   let m = await mediaForScene(scene, tag as any, workDir, cost, { ...cfg, maxAiPhotos: cfg.level === 'low' ? cfg.maxAiPhotos : 99 }, state);
   if (m && wantPhoto && m.kind === 'video') {
     const still = path.join(workDir, `still_${tag}_${Date.now()}.jpg`);
-    await ffmpeg(['-ss', '1', '-i', m.file, '-frames:v', '1', '-q:v', '2', still]);
+    await ffmpeg(withCleanOutput(['-ss', '1', '-i', m.file, '-frames:v', '1', '-q:v', '2', still], { sei: false }));
+    if (fs.existsSync(still)) await stripProvenance(still);
     m = fs.existsSync(still) ? { ...m, kind: 'photo', file: still } : null;
   }
   return m;
@@ -283,13 +287,14 @@ async function normaliseSource(src: string, workDir: string, opts: { reframe?: b
       const vf = Math.abs(ratio - W / H) < 0.12
         ? `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,fps=${FPS}`
         : `split[a][b];[a]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=24:2,eq=brightness=-0.08[bg];[b]scale=${W}:${H}:force_original_aspect_ratio=decrease:force_divisible_by=2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=${FPS}`;
-      const r = await ffmpeg(['-i', src, '-t', maxS, '-filter_complex', `[0:v]${vf}[v]`, '-map', '[v]', '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p', base], Math.max(10 * 60 * 1000, Number(maxS) * 2000));
+      const r = await ffmpeg(withCleanOutput(['-i', src, '-t', maxS, '-filter_complex', `[0:v]${vf}[v]`, '-map', '[v]', '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p', base]), Math.max(10 * 60 * 1000, Number(maxS) * 2000));
       if (r.code !== 0) throw new Error('Could not read the uploaded video: ' + r.err.slice(-200));
     }
   }
   if (!fs.existsSync(audio)) {
-    if (await hasAudioStream(src)) await ffmpeg(['-i', src, '-t', maxS, '-vn', '-c:a', 'aac', '-b:a', '192k', audio]);
-    if (!fs.existsSync(audio)) await ffmpeg(['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-t', String(await probeDuration(base)), '-c:a', 'aac', audio]);
+    if (await hasAudioStream(src)) await ffmpeg(withCleanOutput(['-i', src, '-t', maxS, '-vn', '-c:a', 'aac', '-b:a', '192k', audio], { sei: false }));
+    if (!fs.existsSync(audio)) await ffmpeg(withCleanOutput(['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-t', String(await probeDuration(base)), '-c:a', 'aac', audio], { sei: false }));
+    if (fs.existsSync(audio)) await stripProvenance(audio);
   }
   return { base, audio, duration: await probeDuration(base), reframe };
 }
@@ -302,9 +307,10 @@ async function cutSource(src: string, keep: { start: number; end: number }[], wo
   const fc = [`[0:v]setpts=PTS-STARTPTS,fps=${FPS},select='${sel}',setpts=N/${FPS}/TB[v]`];
   if (audio) fc.push(`[0:a]asetpts=PTS-STARTPTS,aselect='${sel}',asetpts=N/SR/TB[a]`);
   const total = keep.reduce((n, r) => n + r.end - r.start, 0);
-  const r = await ffmpeg(['-i', src, '-filter_complex', fc.join(';'), '-map', '[v]', ...(audio ? ['-map', '[a]', '-c:a', 'aac', '-b:a', '192k'] : []),
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '17', '-pix_fmt', 'yuv420p', out], Math.max(10 * 60 * 1000, total * 4000));
+  const r = await ffmpeg(withCleanOutput(['-i', src, '-filter_complex', fc.join(';'), '-map', '[v]', ...(audio ? ['-map', '[a]', '-c:a', 'aac', '-b:a', '192k'] : []),
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '17', '-pix_fmt', 'yuv420p', out]), Math.max(10 * 60 * 1000, total * 4000));
   if (r.code !== 0 || !fs.existsSync(out)) throw new Error('Could not cut the video: ' + r.err.slice(-200));
+  await stripProvenance(out);
   return out;
 }
 
@@ -446,7 +452,7 @@ async function translate(st: SourceState, lang: string, dub: boolean, workDir: s
       }
       fc.push(`[bg]${parts.map((_, k) => `[d${k}]`).join('')}amix=inputs=${parts.length + 1}:duration=first:normalize=0[a]`);
       dubAudio = path.join(workDir, `dub_mix_${Date.now()}.m4a`);
-      const r = await ffmpeg([...args, '-filter_complex', fc.join(';'), '-map', '[a]', '-c:a', 'aac', '-b:a', '192k', dubAudio]);
+      const r = await ffmpeg(withCleanOutput([...args, '-filter_complex', fc.join(';'), '-map', '[a]', '-c:a', 'aac', '-b:a', '192k', dubAudio], { sei: false }));
       if (r.code !== 0) { console.warn('[dub]', r.err.slice(-300)); dubAudio = undefined; }
     }
   }
@@ -585,7 +591,7 @@ async function runSourceEditInFrame(o: SourceEditInput, layout: SourceLayout): P
   if (layout.cutTo) {
     // transcript of the whole upload first, then keep only the best moments
     const fullAudio = path.join(workDir, 'src_audio_full.m4a');
-    if (!fs.existsSync(fullAudio) && await hasAudioStream(o.sourceFile)) await ffmpeg(['-i', o.sourceFile, '-t', String(Math.ceil(layout.maxSeconds)), '-vn', '-c:a', 'aac', '-b:a', '192k', fullAudio]);
+    if (!fs.existsSync(fullAudio) && await hasAudioStream(o.sourceFile)) { await ffmpeg(withCleanOutput(['-i', o.sourceFile, '-t', String(Math.ceil(layout.maxSeconds)), '-vn', '-c:a', 'aac', '-b:a', '192k', fullAudio], { sei: false })); if (fs.existsSync(fullAudio)) await stripProvenance(fullAudio); }
     o.onProgress(12, say('Transcribing speech...', 'Распознаём речь...'));
     const full = fs.existsSync(fullAudio) ? await transcribe(fullAudio, workDir, 'transcript_full.json') : { words: [] as Word[], segments: [] as any[], language: undefined };
     o.onProgress(20, say('Picking the best moments...', 'Выбираем лучшие моменты...'));

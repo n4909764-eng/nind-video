@@ -114,6 +114,108 @@ export function run(cmd: string, args: string[], opts: { timeoutMs?: number } = 
 
 export const ffmpeg = (args: string[], timeoutMs = 10 * 60 * 1000) => run('ffmpeg', ['-y', '-v', 'error', ...args], { timeoutMs });
 
+/** Drop container / sidecar provenance on the next output file (encoder tags, XMP, chapters). */
+export const STRIP_META_FLAGS = ['-map_metadata', '-1', '-map_chapters', '-1', '-fflags', '+bitexact'];
+export const STRIP_ENCODE_FLAGS = [...STRIP_META_FLAGS, '-flags', '+bitexact', '-metadata', 'encoder=', '-metadata:s:v', 'encoder=', '-metadata:s:a', 'encoder='];
+/** H.264 SEI often carries the "x264 - core ..." ident; not present on audio/image outputs. */
+export const STRIP_H264_SEI = ['-bsf:v', 'filter_units=remove_types=6'];
+
+/** Insert clean-export flags before the output path. */
+export function withCleanOutput(args: string[], opts: { sei?: boolean } = {}): string[] {
+  if (!args.length) return args;
+  const out = args[args.length - 1];
+  const head = args.slice(0, -1);
+  const sei = opts.sei !== false && !/\.(png|jpe?g|webp|mp3|m4a|aac|wav)$/i.test(String(out));
+  return [...head, ...STRIP_ENCODE_FLAGS, ...(sei ? STRIP_H264_SEI : []), out];
+}
+
+const SAFE_PNG_CHUNKS = new Set(['IHDR', 'PLTE', 'tRNS', 'gAMA', 'cHRM', 'sRGB', 'iCCP', 'pHYs', 'IDAT', 'IEND']);
+
+/** Losslessly drop tEXt/iTXt/zTXt/caBX (C2PA) and other non-essential PNG chunks. Pixels stay intact. */
+function stripPngChunks(file: string): boolean {
+  const data = fs.readFileSync(file);
+  if (data.length < 8 || data.subarray(0, 8).compare(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) !== 0) return false;
+  const parts: Buffer[] = [data.subarray(0, 8)];
+  let i = 8;
+  let dropped = false;
+  while (i + 12 <= data.length) {
+    const len = data.readUInt32BE(i);
+    const typ = data.subarray(i + 4, i + 8).toString('latin1');
+    const end = i + 12 + len;
+    if (end > data.length) return false;
+    if (SAFE_PNG_CHUNKS.has(typ)) parts.push(data.subarray(i, end));
+    else dropped = true;
+    i = end;
+  }
+  if (dropped) fs.writeFileSync(file, Buffer.concat(parts));
+  return true;
+}
+
+/** Drop JPEG COM / APPn (EXIF, XMP, IPTC, C2PA) except JFIF (APP0) and ICC (APP2). Pixels stay intact. */
+function stripJpegMarkers(file: string): boolean {
+  const data = fs.readFileSync(file);
+  if (data.length < 4 || data[0] !== 0xff || data[1] !== 0xd8) return false;
+  const parts: Buffer[] = [data.subarray(0, 2)];
+  let i = 2;
+  let dropped = false;
+  while (i + 1 < data.length) {
+    if (data[i] !== 0xff) { parts.push(data.subarray(i)); break; }
+    while (i < data.length && data[i] === 0xff) i++;
+    if (i >= data.length) break;
+    const marker = data[i++];
+    if (marker === 0xd9) { parts.push(Buffer.from([0xff, 0xd9])); break; }
+    if (marker === 0xda) { // SOS: remainder is entropy-coded data
+      parts.push(Buffer.from([0xff, marker]), data.subarray(i));
+      break;
+    }
+    if (marker >= 0xd0 && marker <= 0xd7) { parts.push(Buffer.from([0xff, marker])); continue; }
+    if (i + 2 > data.length) return false;
+    const len = data.readUInt16BE(i);
+    const end = i + len;
+    if (end > data.length) return false;
+    const drop = marker === 0xfe || (marker >= 0xe1 && marker <= 0xef && marker !== 0xe2);
+    if (drop) dropped = true;
+    else parts.push(Buffer.from([0xff, marker]), data.subarray(i, end));
+    i = end;
+  }
+  if (dropped) fs.writeFileSync(file, Buffer.concat(parts));
+  return true;
+}
+
+/**
+ * Strip provenance metadata from an intermediate or final media file in place.
+ * Removes C2PA/JUMBF, XMP/IPTC (incl. trainedAlgorithmicMedia, "Made with Google AI"),
+ * encoder/comment tags and ID3. Does not alter pixels or audio samples — invisible
+ * watermarks such as SynthID are left untouched.
+ */
+export async function stripProvenance(file: string): Promise<void> {
+  if (!file || !fs.existsSync(file) || fs.statSync(file).size < 32) return;
+  const ext = path.extname(file).toLowerCase();
+  try {
+    if (ext === '.png' && stripPngChunks(file)) return;
+    if ((ext === '.jpg' || ext === '.jpeg') && stripJpegMarkers(file)) return;
+    const tmp = `${file}.clean${ext}`;
+    const args = ['-i', file, ...STRIP_META_FLAGS, '-c', 'copy'];
+    if (ext === '.mp3') args.push('-id3v2_version', '0');
+    if (ext === '.mp4' || ext === '.m4a' || ext === '.mov') args.push('-movflags', '+faststart', '-metadata', 'encoder=');
+    const tryRun = async (extra: string[]) => {
+      const r = await ffmpeg([...args, ...extra, tmp], 180_000);
+      if (r.code === 0 && fs.existsSync(tmp) && fs.statSync(tmp).size > 0) {
+        fs.renameSync(tmp, file);
+        return true;
+      }
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+      return false;
+    };
+    if (ext === '.mp4' || ext === '.mov' || ext === '.m4v') {
+      if (await tryRun(STRIP_H264_SEI)) return;
+    }
+    await tryRun([]);
+  } catch (e) {
+    console.warn('[stripProvenance]', path.basename(file), (e as Error).message);
+  }
+}
+
 export async function probeDuration(file: string): Promise<number> {
   const r = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', file]);
   const d = parseFloat(r.out.trim());
@@ -348,8 +450,9 @@ export function generateSpeech(text: string, outMp3: string, cost: CostTracker, 
         if (!bufs.length) return resolve(false);
         const pcm = outMp3.replace(/\.[^.]+$/, '.pcm');
         fs.writeFileSync(pcm, Buffer.concat(bufs));
-        const r = await ffmpeg(['-f', 's16le', '-ar', '24000', '-ac', '1', '-i', pcm, '-af', 'silenceremove=start_periods=1:start_threshold=-50dB', '-c:a', 'libmp3lame', '-b:a', '192k', outMp3]);
+        const r = await ffmpeg(withCleanOutput(['-f', 's16le', '-ar', '24000', '-ac', '1', '-i', pcm, '-af', 'silenceremove=start_periods=1:start_threshold=-50dB', '-c:a', 'libmp3lame', '-b:a', '192k', outMp3], { sei: false }));
         try { fs.unlinkSync(pcm); } catch { /* ignore */ }
+        if (r.code === 0 && fs.existsSync(outMp3)) await stripProvenance(outMp3);
         resolve(r.code === 0 && fs.existsSync(outMp3));
       });
     });
@@ -469,8 +572,9 @@ async function verifyCandidates(scene: SceneSpec, cands: Candidate[], workDir: s
     const raw = path.join(workDir, `cand_${tag}_${i}.bin`);
     const jpg = path.join(workDir, `cand_${tag}_${i}.jpg`);
     if (!(await download(c.thumb, raw, 8 * 1024 * 1024, 20))) return null;
-    const r = await ffmpeg(['-i', raw, '-frames:v', '1', '-vf', 'scale=384:384:force_original_aspect_ratio=decrease', '-q:v', '5', jpg], 30000);
-    return r.code === 0 && fs.existsSync(jpg) ? fs.readFileSync(jpg).toString('base64') : null;
+    const r = await ffmpeg(withCleanOutput(['-i', raw, '-frames:v', '1', '-vf', 'scale=384:384:force_original_aspect_ratio=decrease', '-q:v', '5', jpg], { sei: false }), 30000);
+    if (r.code === 0 && fs.existsSync(jpg)) { await stripProvenance(jpg); return fs.readFileSync(jpg).toString('base64'); }
+    return null;
   });
   const valid = thumbs.map((t, i) => ({ t, i })).filter((x) => x.t);
   if (!valid.length) return { idx: -1, score: 0, bestIdx: -1, bestScore: 0 };
@@ -622,6 +726,7 @@ async function acceptStock(c: Candidate, kind: 'video' | 'photo', workDir: strin
   const ext = kind === 'video' ? (c.url.endsWith('.webm') ? '.webm' : '.mp4') : '.jpg';
   const file = path.join(workDir, `scene_${i}_${Date.now()}${ext}`);
   if (!(await download(c.url, file, kind === 'video' ? 120 * 1024 * 1024 : 25 * 1024 * 1024, 120))) return null;
+  await stripProvenance(file);
   const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width', '-of', 'csv=p=0', file]);
   if (probe.code !== 0 || !parseInt(probe.out)) { try { fs.unlinkSync(file); } catch { /* ignore */ } return null; }
   return { kind, source: c.source, file, page_url: c.page_url, verified_score: score };
@@ -700,7 +805,8 @@ async function imageFromResponse(res: any, out: string): Promise<boolean> {
   }
   if (!b64) return false;
   fs.writeFileSync(out, Buffer.from(b64, 'base64'));
-  return fs.statSync(out).size > 1024;
+  if (fs.statSync(out).size > 1024) { await stripProvenance(out); return true; }
+  return false;
 }
 
 export async function generateRealPhoto(prompt: string, out: string, cost: CostTracker, label: string, model = MODELS.image, aspect: string = curFrame().aspect): Promise<boolean> {
@@ -741,9 +847,10 @@ export async function makeOverlayElement(element: string, workDir: string, cost:
   const r = await run(pyBin(), [HELPER, 'rembg', raw, outPng], { timeoutMs: 5 * 60 * 1000 });
   if (r.code !== 0 || !fs.existsSync(outPng)) {
     // fallback: chroma-key the white background
-    const f = await ffmpeg(['-i', raw, '-vf', 'format=rgba,colorkey=0xFFFFFF:0.12:0.08', outPng]);
+    const f = await ffmpeg(withCleanOutput(['-i', raw, '-vf', 'format=rgba,colorkey=0xFFFFFF:0.12:0.08', outPng], { sei: false }));
     if (f.code !== 0) return null;
   }
+  if (fs.existsSync(outPng)) await stripProvenance(outPng);
   return outPng;
 }
 
@@ -766,7 +873,7 @@ export async function renderSceneClip(media: NonNullable<SceneSpec['media']>, i:
   const fr = curFrame();
   const { w: W, h: H } = fr;
   const { bw, bh } = bigCanvas(fr);
-  const enc = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p', '-r', String(FPS), '-an', '-frames:v', String(frames)];
+  const enc = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p', '-r', String(FPS), '-an', '-frames:v', String(frames), ...STRIP_ENCODE_FLAGS, ...STRIP_H264_SEI];
   const dims = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', media.file]);
   const [iw, ih] = dims.out.trim().split(',').map(Number);
   // horizontal frame + vertical/square media: blurred fill + the whole media in the middle (never a thin centre slice)
@@ -968,7 +1075,10 @@ async function runVideoPipelineInFrame(inp: PipelineInput): Promise<PipelineResu
   await mapLimit(scenes, 3, async (s, i) => {
     const prev = inp.previous?.scenes?.[i];
     if (inp.attachedImages?.[i] && fs.existsSync(inp.attachedImages[i])) {
-      s.media = { kind: 'photo', source: 'user', file: inp.attachedImages[i] };
+      const src = inp.attachedImages[i];
+      const f = path.join(workDir, `user_img_${i}_${path.basename(src)}`);
+      try { fs.copyFileSync(src, f); await stripProvenance(f); } catch { /* keep original */ }
+      s.media = { kind: 'photo', source: 'user', file: fs.existsSync(f) ? f : src };
     } else if (prev && s.needs_new_visual === false && prev.media?.file && fs.existsSync(prev.media.file)) {
       s.media = prev.media;
     } else {
@@ -1088,7 +1198,7 @@ export async function assembleVideo(a: AssembleInput): Promise<void> {
   const list = path.join(workDir, 'concat.txt');
   fs.writeFileSync(list, clips.map((c) => `file '${c}'`).join('\n'));
   const merged = path.join(workDir, 'merged.mp4');
-  const cr = await ffmpeg(['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', merged]);
+  const cr = await ffmpeg(withCleanOutput(['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', merged], { sei: false }));
   if (cr.code !== 0) throw new Error('concat failed: ' + cr.err.slice(-200));
 
   const ass = await buildAss(workDir, words, duration, headlines, a.style);
@@ -1138,8 +1248,11 @@ export async function composeFinal(c: { baseVideo: string; overlays: OverlayItem
   fc.push(`${last}subtitles=filename='${esc(c.assFile)}':fontsdir='${esc(FONT_DIR)}'[vout]`);
   args.push('-filter_complex', fc.join(';'), '-map', '[vout]', '-map', `${audioIdx}:a`,
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', String(FPS),
-    '-c:a', 'aac', '-b:a', '192k', '-t', duration.toFixed(3), '-movflags', '+faststart', c.outVideo);
+    '-c:a', 'aac', '-b:a', '192k', '-t', duration.toFixed(3), '-movflags', '+faststart',
+    ...STRIP_ENCODE_FLAGS, ...STRIP_H264_SEI, c.outVideo);
   const rr = await ffmpeg(args, Math.max(20 * 60 * 1000, duration * 2500));
   if (rr.code !== 0 || !fs.existsSync(c.outVideo)) throw new Error('final render failed: ' + rr.err.slice(-400));
-  await ffmpeg(['-ss', Math.min(1, duration / 2).toFixed(2), '-i', c.outVideo, '-frames:v', '1', '-q:v', '3', c.outPoster]);
+  await ffmpeg(withCleanOutput(['-ss', Math.min(1, duration / 2).toFixed(2), '-i', c.outVideo, '-frames:v', '1', '-q:v', '3', c.outPoster], { sei: false }));
+  await stripProvenance(c.outVideo);
+  if (fs.existsSync(c.outPoster)) await stripProvenance(c.outPoster);
 }

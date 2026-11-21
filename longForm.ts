@@ -11,6 +11,7 @@ import {
   CostTracker, Level, LevelCfg, levelCfg, normLevel, MODELS, EST, SceneSpec, Word, PipelineInput, PipelineResult,
   orChat, extractJson, generateSpeech, alignWords, mediaForScene, fillMissingMedia, sceneTiming, assembleVideo,
   mapLimit, ffmpeg, probeDuration, reserve, release, withFrame, frameFor, ensureHighStockPlan, fulfillHighStock,
+  withCleanOutput, stripProvenance,
 } from './videoPipeline';
 
 // ================================================================== intent detection
@@ -271,7 +272,8 @@ async function chunkedVoiceover(scenes: SceneSpec[], workDir: string, o: { cost:
   const list = path.join(dir, 'list.txt');
   fs.writeFileSync(list, files.map((f) => `file '${f}'`).join('\n'));
   const audioFile = path.join(workDir, `voiceover_${Date.now()}.mp3`);
-  const r = await ffmpeg(['-f', 'concat', '-safe', '0', '-i', list, '-c:a', 'libmp3lame', '-b:a', '192k', audioFile], 15 * 60 * 1000);
+  const r = await ffmpeg(withCleanOutput(['-f', 'concat', '-safe', '0', '-i', list, '-c:a', 'libmp3lame', '-b:a', '192k', audioFile], { sei: false }), 15 * 60 * 1000);
+  if (r.code === 0 && fs.existsSync(audioFile)) await stripProvenance(audioFile);
   if (r.code !== 0) throw new Error('voiceover concat failed: ' + r.err.slice(-200));
   return { audioFile, words, chunks: chunks.length };
 }

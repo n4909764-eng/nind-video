@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import https from 'https';
 import dotenv from 'dotenv';
-import { runVideoPipeline, newCostTracker, CostTracker, levelCfg, normLevel, Level, ffmpeg } from './videoPipeline';
+import { runVideoPipeline, newCostTracker, CostTracker, levelCfg, normLevel, Level, ffmpeg, withCleanOutput, stripProvenance } from './videoPipeline';
 import { applyCreatedEdit, runSourceEdit, applySourceEdit, SourceState } from './editEngine';
 import { planCreation, estimateCreation, runLongVideoPipeline, decideSourceLayout } from './longForm';
 import { probeVideo } from './smartReframe';
@@ -203,7 +203,8 @@ async function makeUploadThumbnail(srcPath: string, originalName?: string, mime?
   const vf = "scale='min(360,iw)':-2";
   for (const ss of [0.5, 0]) {
     try {
-      const r = await ffmpeg(['-ss', String(ss), '-i', srcPath, '-an', '-frames:v', '1', '-vf', vf, '-q:v', '3', thumbPath], 45_000);
+      const r = await ffmpeg(withCleanOutput(['-ss', String(ss), '-i', srcPath, '-an', '-frames:v', '1', '-vf', vf, '-q:v', '3', thumbPath], { sei: false }), 45_000);
+      if (r.code === 0 && fs.existsSync(thumbPath)) await stripProvenance(thumbPath);
       if (r.code === 0 && fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 200) {
         return `/api/uploads/${thumbName}`;
       }
