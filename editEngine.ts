@@ -11,6 +11,7 @@ import {
   orChat, extractJson, generateSpeech, alignWords, mediaForScene, fillMissingMedia, sceneTiming, assembleVideo,
   composeFinal, buildAss, makeOverlayElement, findPhrase, findWord, renderSceneClip, mapLimit, ffmpeg, run,
   probeDuration, pyBin, HELPER, W, H, FPS, runVideoPipeline, overlayWindow, EST, reserve, release,
+  deriveSearchQuery,
 } from './videoPipeline';
 import { CaptionStyle, DEFAULT_STYLE, FONTS, fontKey, normColor } from './captionStyle';
 
@@ -278,7 +279,7 @@ const SOURCE_PLAN_SYSTEM = (cfg: LevelCfg) => `You are a professional short-form
 Plan real edits on top of THEIR footage (their original audio is kept):
 - subtitles: true unless the user says no subtitles (there must be speech).
 - headlines: 1-3 key punchlines (big captions). phrase = 2-6 consecutive words copied EXACTLY from the transcript; highlight = one word of it.
-- inserts: moments where an illustrating visual should appear while that thing is mentioned. phrase = 1-4 consecutive words copied EXACTLY from the transcript where it should appear. display: "fullscreen" (cutaway that covers the frame), "rounded" (popup photo card with rounded corners) or "square" (popup square photo). media_type: "stock_video" | "stock_photo" | "ai_photo". search_query = 2-4 English keywords, concrete nouns. ${cfg.level === 'low' ? 'COST-SAVING: use stock media only, at most 1 ai_photo, 2-3 inserts.' : cfg.level === 'high' ? 'HIGH QUALITY: 4-6 inserts, mix best stock and photoreal ai_photo.' : '3-5 inserts.'} Spread them out; no two within 2 seconds.
+- inserts: moments where an illustrating visual should appear while that thing is mentioned. phrase = 1-4 consecutive words copied EXACTLY from the transcript where it should appear. display: "fullscreen" (cutaway that covers the frame), "rounded" (popup photo card with rounded corners) or "square" (popup square photo). media_type: "stock_video" | "stock_photo" | "ai_photo". search_query = 2-4 English keywords, concrete nouns. ${cfg.level === 'low' ? 'COST-SAVING: use stock media only, at most 1 ai_photo, 2-3 inserts.' : cfg.level === 'high' ? 'HIGH QUALITY: 4-6 inserts. At least 3 of them (or 2 if the video is under ~35s) MUST be stock_video or stock_photo, preferring stock_video and HD real footage. Use ai_photo only when nothing real can show that moment.' : '3-5 inserts.'} Spread them out; no two within 2 seconds.
 - overlays: 0-2 iconic popup objects (3D sticker style, e.g. "yellow warning triangle", "stack of dollar bills"). trigger_word = one word copied exactly from transcript.
 - translate_to: null, or the target language ISO code if the user asks to translate. dub: true only if the user asks for voice-over/dubbing in the other language (otherwise translated subtitles).
 - If the user's request only asks for specific things (e.g. "add subtitles"), do only those (empty arrays for the rest).
@@ -422,6 +423,96 @@ async function renderSource(st: SourceState, workDir: string, outVideo: string, 
   await composeFinal({ baseVideo: st.base, overlays, assFile: ass, audioFile: st.translated?.dubAudio || st.audio, duration: st.duration, outVideo, outPoster });
 }
 
+
+/** High-level: at least 2 stock inserts on mid-length footage, 3 when the video is longer. */
+export function highInsertTarget(durationSec: number, wordCount: number): number {
+  if (durationSec >= 35 && wordCount >= 30) return 3;
+  if (durationSec >= 12 && wordCount >= 16) return 2;
+  return 0;
+}
+
+function userDeclinedInserts(request: string): boolean {
+  const r = String(request || '').toLowerCase();
+  if (/\bno\s+(inserts?|photos?|videos?|stock|media|footage|b-?roll)\b/.test(r)) return true;
+  const onlyLite = /\b(only|just|только|лишь)\b/.test(r) && /\b(subtitle|caption|headline|transl|субтит|заголов|перевод)/.test(r);
+  const wantsMedia = /\b(insert|stock|footage|photo|video|b-?roll|media|вставк|фото|видео)\b/.test(r);
+  return onlyLite && !wantsMedia;
+}
+
+function insertPhrases(words: Word[]): { phrase: string; i: number }[] {
+  const stop = new Set(['the','a','an','and','or','but','to','of','in','on','for','with','that','this','it','is','was','are','be','as','at','by','from','i','we','you','they','he','she','my','our','your','me','not','so','if','do','did','just','like','have','has','had','это','как','что','для','или','но','не','на','по','из','от','за','то','же','бы','меня','мне','мой','моя','мы','я','ты','вы','он','она','они','это']);
+  const out: { phrase: string; i: number }[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i].w.replace(/[^\p{L}\p{N}-]/gu, '');
+    if (w.length < 4 || stop.has(w.toLowerCase())) continue;
+    const nxt = words[i + 1]?.w.replace(/[^\p{L}\p{N}-]/gu, '') || '';
+    const phrase = nxt.length >= 3 && !stop.has(nxt.toLowerCase()) ? `${w} ${nxt}` : w;
+    out.push({ phrase, i });
+  }
+  return out;
+}
+
+/** Upgrade or add stock inserts when the High planner returned too few. */
+export function ensureHighEditStockInserts(plan: SourcePlan, words: Word[], duration: number, request: string): void {
+  if (userDeclinedInserts(request)) return;
+  const target = highInsertTarget(duration, words.length);
+  if (!target) return;
+  const isStock = (x: SourcePlan['inserts'][number]) => x.media_type === 'stock_video' || x.media_type === 'stock_photo';
+  for (const x of plan.inserts) {
+    if (x.media_type === 'ai_photo') {
+      x.media_type = x.display === 'fullscreen' ? 'stock_video' : 'stock_photo';
+      if (!String(x.search_query || '').trim()) x.search_query = deriveSearchQuery(x) || x.visual_description || x.phrase;
+      console.log(`[high stock] upgraded insert "${x.phrase}" to ${x.media_type} query="${x.search_query}"`);
+    } else if (!String(x.search_query || '').trim()) {
+      x.search_query = deriveSearchQuery(x) || x.visual_description || x.phrase;
+    }
+    if (x.media_type === 'stock_photo' && x.display === 'fullscreen') x.media_type = 'stock_video';
+  }
+  let have = plan.inserts.filter(isStock).length;
+  if (have >= target) return;
+  const used = new Set(plan.inserts.map((x) => x.phrase.toLowerCase()));
+  const busy: [number, number][] = [
+    ...plan.inserts.filter((x) => x.start != null && x.end != null).map((x) => [x.start!, x.end!] as [number, number]),
+    ...plan.headlines.filter((h) => h.start_idx != null).map((h) => [words[h.start_idx!]?.start ?? 0, (words[h.end_idx!]?.end ?? 0) + 0.9] as [number, number]),
+  ];
+  const cands = insertPhrases(words);
+  const slots = target === 3 ? [0.22, 0.5, 0.78] : [0.3, 0.7];
+  const displays: Array<'fullscreen' | 'rounded' | 'square'> = ['fullscreen', 'rounded', 'square'];
+  for (const frac of slots) {
+    if (have >= target) break;
+    const t = duration * frac;
+    const nearby = cands
+      .filter((c) => !used.has(c.phrase.toLowerCase()))
+      .sort((a, b) => Math.abs(words[a.i].start - t) - Math.abs(words[b.i].start - t));
+    let picked: typeof cands[number] | null = null;
+    for (const c of nearby) {
+      const start = Math.max(0, words[c.i].start - 0.05);
+      const end = Math.min(duration - 0.05, start + 2.6);
+      if (end - start < 1.2) continue;
+      if (busy.some(([s, e]) => start < e + 0.4 && end > s - 0.4)) continue;
+      picked = c;
+      break;
+    }
+    if (!picked) continue;
+    const display = displays[plan.inserts.length % displays.length];
+    const query = deriveSearchQuery({ search_query: '', visual_description: picked.phrase, voiceover_chunk: picked.phrase }) || picked.phrase;
+    plan.inserts.push({
+      phrase: picked.phrase,
+      display,
+      media_type: display === 'fullscreen' ? 'stock_video' : 'stock_photo',
+      search_query: query,
+      visual_description: picked.phrase,
+      ai_image_prompt: picked.phrase,
+    });
+    used.add(picked.phrase.toLowerCase());
+    have++;
+    console.log(`[high stock] added insert "${picked.phrase}" as ${display === 'fullscreen' ? 'stock_video' : 'stock_photo'} query="${query}"`);
+  }
+  if (plan.inserts.filter(isStock).length < target) {
+    console.warn(`[high stock] edit plan has ${plan.inserts.filter(isStock).length} stock inserts (target ${target})`);
+  }
+}
+
 export async function runSourceEdit(o: {
   sourceFile: string; prompt: string; level?: Level; style?: CaptionStyle; voice?: string; workDir: string; outVideo: string; outPoster: string;
   cost: CostTracker; onProgress: Progress; ru: boolean;
@@ -446,6 +537,10 @@ export async function runSourceEdit(o: {
   let style: CaptionStyle = { ...DEFAULT_STYLE, ...(o.style || {}) };
   if (raw.style) style = applyStyleOp(style, raw.style);
   timePlan(plan, tr.words, duration);
+  if (cfg.level === 'high') {
+    ensureHighEditStockInserts(plan, tr.words, duration, o.prompt);
+    timePlan(plan, tr.words, duration);
+  }
   const notes: string[] = [];
   o.onProgress(45, say('Finding matching footage and photos...', 'Подбираем подходящие видео и фото...'));
   await prepareInsertMedia(plan, tr.words, workDir, cost, cfg, notes);

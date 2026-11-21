@@ -48,7 +48,7 @@ export function levelCfg(level: Level): LevelCfg {
   };
   if (level === 'high') return {
     level, tts: MODELS.ttsHigh, image: MODELS.image, visionMin: 8, hd: true, maxAiPhotos: 99, capUsd: 1.2, maxOverlays: 3,
-    scriptRule: 'media_type: HIGH-QUALITY mode. Mix the best real footage and photoreal AI photos: about half of the scenes "stock_video"/"stock_photo" (iconic, cinematic, high-resolution shots), the rest "ai_photo" for moments that need a precise composition.',
+    scriptRule: 'media_type: HIGH-QUALITY mode. At least half of the scenes MUST be "stock_video" or "stock_photo". Prefer "stock_video": real, cinematic, high-resolution footage of places, people, nature, cities, objects, events, technology. Use "ai_photo" only for moments that cannot be found as real footage (very specific or fictional compositions). Every scene needs a concrete English search_query.',
   };
   return {
     level, tts: MODELS.tts, image: MODELS.image, visionMin: 7, hd: false, maxAiPhotos: 99, capUsd: 0.6, maxOverlays: 2,
@@ -287,6 +287,7 @@ export async function writeScript(opts: {
   if (!scenes.length) throw new Error('Script generation returned no scenes');
   let ai = 0;
   for (const s of scenes) if (s.media_type === 'ai_photo' && ++ai > cfg.maxAiPhotos) s.media_type = 'stock_photo';
+  if (cfg.level === 'high') ensureHighStockPlan(scenes);
   return { title: String(data.title || opts.prompt.slice(0, 40)), scenes, needs_new_voiceover: data.needs_new_voiceover !== false };
 }
 
@@ -373,7 +374,7 @@ export async function alignWords(audio: string, script: string, workDir: string,
 }
 
 // ------------------------------------------------------------------ 4. media: stock search + vision verification
-interface Candidate { source: string; kind: 'video' | 'photo'; thumb: string; url: string; page_url?: string; w?: number; h?: number }
+export interface Candidate { source: string; kind: 'video' | 'photo'; thumb: string; url: string; page_url?: string; w?: number; h?: number }
 
 async function pexels(query: string, kind: 'video' | 'photo', hd = false): Promise<Candidate[]> {
   const key = process.env.PEXELS_API_KEY;
@@ -450,7 +451,7 @@ export async function wikimedia(query: string, kind: 'video' | 'photo', hd = fal
 }
 
 /** Ask a cheap vision model which candidate (if any) really shows the scene. */
-async function verifyCandidates(scene: SceneSpec, cands: Candidate[], workDir: string, cost: CostTracker, tag: string, minScore = 7): Promise<{ idx: number; score: number }> {
+async function verifyCandidates(scene: SceneSpec, cands: Candidate[], workDir: string, cost: CostTracker, tag: string, minScore = 7): Promise<{ idx: number; score: number; bestIdx: number; bestScore: number }> {
   const thumbs = await mapLimit(cands, 4, async (c, i) => {
     const raw = path.join(workDir, `cand_${tag}_${i}.bin`);
     const jpg = path.join(workDir, `cand_${tag}_${i}.jpg`);
@@ -459,38 +460,41 @@ async function verifyCandidates(scene: SceneSpec, cands: Candidate[], workDir: s
     return r.code === 0 && fs.existsSync(jpg) ? fs.readFileSync(jpg).toString('base64') : null;
   });
   const valid = thumbs.map((t, i) => ({ t, i })).filter((x) => x.t);
-  if (!valid.length) return { idx: -1, score: 0 };
+  if (!valid.length) return { idx: -1, score: 0, bestIdx: -1, bestScore: 0 };
   const content: any[] = [{
     type: 'text',
     text: `You check stock media for a short video. Scene narration: "${scene.voiceover_chunk}". Required visual: "${scene.visual_description}".
 Below are ${valid.length} candidate images (${cands[0].kind === 'video' ? 'video thumbnails' : 'photos'}), numbered 1..${valid.length} in order.
-Score each 0-10 for how well it literally shows the required visual AND is a clean real-world photo/footage frame (penalize maps, diagrams, text-heavy images, logos, collages, watermarks, low quality, unrelated subjects).
+Score each 0-10 for how well it literally shows the required visual AND is a clean real-world photo/footage frame. Penalize maps, diagrams, text-heavy images, logos, collages, low quality, and unrelated subjects. If a watermark or logo overlay is clearly visible, or it is not a real photograph/footage frame, score it at most 4.
 Return ONLY JSON: {"scores":[...], "best": <number 1..${valid.length} or 0 if none scores >= ${minScore}>}`,
   }];
   valid.forEach((v) => content.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${v.t}` } }));
-  if (!reserve(cost, EST.vision)) return { idx: -1, score: 0 };
+  if (!reserve(cost, EST.vision)) return { idx: -1, score: 0, bestIdx: -1, bestScore: 0 };
   try {
     const res = await orChat({ model: MODELS.vision, messages: [{ role: 'user', content }], response_format: { type: 'json_object' }, temperature: 0 }, cost, `vision check scene ${scene.scene_num}`);
     const j = extractJson(res?.choices?.[0]?.message?.content || '') || {};
     const scores: number[] = Array.isArray(j.scores) ? j.scores.map(Number) : [];
-    let best = Number(j.best) || 0;
-    if (!best && scores.length) {
-      const m = Math.max(...scores);
-      if (m >= minScore) best = scores.indexOf(m) + 1;
+    let bestAll = -1, bestScore = 0;
+    if (scores.length) {
+      bestScore = Math.max(...scores.map((n) => (isFinite(n) ? n : 0)));
+      bestAll = scores.findIndex((n) => n === bestScore);
     }
+    let best = Number(j.best) || 0;
+    if (!best && bestScore >= minScore) best = bestAll + 1;
     const score = best ? (scores[best - 1] ?? minScore) : 0;
-    if (best < 1 || best > valid.length || score < minScore) return { idx: -1, score };
-    return { idx: valid[best - 1].i, score };
+    const bestIdx = bestAll >= 0 ? valid[bestAll].i : -1;
+    if (best < 1 || best > valid.length || score < minScore) return { idx: -1, score: 0, bestIdx, bestScore };
+    return { idx: valid[best - 1].i, score, bestIdx, bestScore };
   } catch (e) {
     console.warn('[vision]', (e as Error).message);
-    return { idx: -1, score: 0 };
+    return { idx: -1, score: 0, bestIdx: -1, bestScore: 0 };
   } finally { release(cost, EST.vision); }
 }
 
 const QUERY_NOISE = /\b(footage|video|videos|clip|photo|photos|image|images|picture|shot|stock|hd|4k|scene|of|the|a|an|and|with|in|on)\b/gi;
 
 /** Full query first, then progressively broader ones until some source returns results. */
-function queryVariants(q: string): string[] {
+export function queryVariants(q: string): string[] {
   const words = q.replace(QUERY_NOISE, ' ').replace(/[^\p{L}\p{N}\s-]/gu, ' ').split(/\s+/).filter(Boolean);
   const out: string[] = [];
   for (let n = Math.min(words.length, 4); n >= 1; n--) out.push(words.slice(0, n).join(' '));
@@ -498,32 +502,174 @@ function queryVariants(q: string): string[] {
   return [...new Set(out)].slice(0, 4);
 }
 
-export interface StockOpts { minScore?: number; hd?: boolean; exclude?: Set<string> }
+const QUERY_SYNONYMS: Record<string, string[]> = {
+  smartphone: ['mobile phone', 'cell phone'], phone: ['smartphone', 'mobile phone'],
+  computer: ['laptop computer', 'desktop computer'], laptop: ['notebook computer', 'laptop desk'],
+  car: ['automobile traffic', 'city cars'], city: ['city skyline', 'urban street'],
+  people: ['crowd pedestrians', 'people walking'], person: ['man walking', 'woman portrait'],
+  nature: ['landscape nature', 'forest trees'], forest: ['woodland trees', 'forest path'],
+  ocean: ['sea waves', 'ocean water'], sea: ['ocean waves', 'sea water'],
+  mountain: ['mountain range', 'alpine landscape'], beach: ['sandy beach', 'beach waves'],
+  office: ['office desk', 'workplace office'], factory: ['industrial factory', 'factory floor'],
+  school: ['classroom school', 'students classroom'], university: ['university campus', 'college campus'],
+  money: ['cash money', 'banknotes'], social: ['social media phone', 'smartphone scrolling'],
+  robot: ['industrial robot', 'robot arm'],
+  ai: ['artificial intelligence computer', 'data center'],
+  night: ['night city lights', 'night sky'], food: ['restaurant food', 'cooked meal'],
+  street: ['city street', 'busy road'], crowd: ['crowded people', 'busy street crowd'],
+};
 
-export async function findStock(scene: SceneSpec, kind: 'video' | 'photo', workDir: string, cost: CostTracker, i: number | string, o: StockOpts = {}): Promise<SceneSpec['media'] | null> {
-  const variants = queryVariants(scene.search_query || scene.visual_description);
-  let lists: Candidate[][] = [];
-  const hd = !!o.hd;
-  for (const q of variants) {
-    lists = await Promise.all([pexels(q, kind, hd), pixabay(q, kind, hd), wikimedia(q, kind, hd), openverse(q, kind, hd)]);
-    if (o.exclude) lists = lists.map((l) => l.filter((c) => !o.exclude!.has(c.url)));
-    if (lists.reduce((n, l) => n + l.length, 0) >= 2) break;
+function latinKeywords(text: string, max = 4): string {
+  const words = String(text || '').replace(QUERY_NOISE, ' ').replace(/[^\p{L}\p{N}\s-]/gu, ' ')
+    .split(/\s+/).filter((w) => /[A-Za-z]{3,}/.test(w));
+  return words.slice(0, max).join(' ');
+}
+
+/** Concrete English (or source) keywords for a stock search. */
+export function deriveSearchQuery(s: { search_query?: string; visual_description?: string; voiceover_chunk?: string; ai_image_prompt?: string }): string {
+  for (const t of [s.search_query, s.visual_description, s.ai_image_prompt, s.voiceover_chunk]) {
+    const k = latinKeywords(t || '', 4);
+    if (k) return k.slice(0, 80);
   }
-  // interleave sources, max 6 candidates per vision call
+  return String(s.search_query || s.visual_description || s.voiceover_chunk || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
+/** High-level query list: original, visual description, broader cuts, and synonyms. */
+export function stockQueryVariants(scene: { search_query?: string; visual_description?: string; voiceover_chunk?: string; ai_image_prompt?: string }, wide = false): string[] {
+  const primary = deriveSearchQuery(scene);
+  const out: string[] = primary ? queryVariants(primary) : [];
+  if (wide) {
+    for (const t of [scene.visual_description, scene.ai_image_prompt]) {
+      const extra = latinKeywords(t || '', 3);
+      if (extra && extra.toLowerCase() !== primary.toLowerCase()) out.push(...queryVariants(extra));
+    }
+    const words = primary.toLowerCase().split(/\s+/).filter(Boolean);
+    for (const w of words) {
+      for (const syn of (QUERY_SYNONYMS[w] || [])) {
+        out.push(syn);
+        const swapped = words.map((x) => (x === w ? syn : x)).join(' ');
+        if (swapped !== syn) out.push(swapped);
+      }
+    }
+  }
+  return [...new Set(out.map((s) => s.trim()).filter(Boolean))].slice(0, wide ? 10 : 4);
+}
+
+/** Minimum number of created-video scenes that must use real web stock on High. */
+export function highStockTarget(sceneCount: number): number {
+  if (sceneCount <= 0) return 0;
+  if (sceneCount === 1) return 1;
+  return Math.max(2, Math.ceil(sceneCount * 0.5));
+}
+
+/** Upgrade planner output so High videos have a guaranteed stock share. */
+export function ensureHighStockPlan(scenes: SceneSpec[]): void {
+  const target = highStockTarget(scenes.length);
+  const isStock = (s: SceneSpec) => s.media_type === 'stock_video' || s.media_type === 'stock_photo';
+  for (const s of scenes) if (!String(s.search_query || '').trim()) s.search_query = deriveSearchQuery(s);
+  let n = scenes.filter(isStock).length;
+  if (n >= target) return;
+  const unfilmable = /\b(fictional|fantasy|futuristic|imaginary|surreal|impossible|cgi|made-up|hypothetical|invented)\b/i;
+  const order = scenes
+    .filter((s) => !isStock(s))
+    .sort((a, b) => Number(unfilmable.test(`${a.visual_description} ${a.ai_image_prompt}`)) - Number(unfilmable.test(`${b.visual_description} ${b.ai_image_prompt}`)));
+  for (const s of order) {
+    if (n >= target) break;
+    s.media_type = 'stock_video';
+    s.search_query = deriveSearchQuery(s);
+    n++;
+    console.log(`[high stock] upgraded scene ${s.scene_num} to stock_video query="${s.search_query}"`);
+  }
+}
+
+export async function collectStockCandidates(query: string, kind: 'video' | 'photo', hd = false, exclude?: Set<string>): Promise<Candidate[]> {
+  let lists: Candidate[][] = await Promise.all([pexels(query, kind, hd), pixabay(query, kind, hd), wikimedia(query, kind, hd), openverse(query, kind, hd)]);
+  if (exclude) lists = lists.map((l) => l.filter((c) => !exclude!.has(c.url)));
   const cands: Candidate[] = [];
-  for (let k = 0; k < 5 && cands.length < 6; k++) for (const l of lists) if (l[k] && cands.length < 6) cands.push(l[k]);
-  if (!cands.length) return null;
-  const { idx, score } = await verifyCandidates(scene, cands, workDir, cost, `${i}_${kind}`, o.minScore ?? 7);
-  if (idx < 0) return null;
-  const c = cands[idx];
-  o.exclude?.add(c.url);
+  for (let k = 0; k < 5 && cands.length < 8; k++) for (const l of lists) if (l[k] && cands.length < 8) cands.push(l[k]);
+  return cands;
+}
+
+function interleaveCandidates(lists: Candidate[][], exclude?: Set<string>, used?: Set<string>, max = 6): Candidate[] {
+  const cands: Candidate[] = [];
+  for (let k = 0; k < 5 && cands.length < max; k++) {
+    for (const l of lists) {
+      const c = l[k];
+      if (!c || (exclude && exclude.has(c.url)) || (used && used.has(c.url))) continue;
+      if (cands.some((x) => x.url === c.url)) continue;
+      cands.push(c);
+      if (cands.length >= max) break;
+    }
+  }
+  return cands;
+}
+
+async function acceptStock(c: Candidate, kind: 'video' | 'photo', workDir: string, i: number | string, exclude?: Set<string>, score?: number): Promise<SceneSpec['media'] | null> {
+  exclude?.add(c.url);
   const ext = kind === 'video' ? (c.url.endsWith('.webm') ? '.webm' : '.mp4') : '.jpg';
   const file = path.join(workDir, `scene_${i}_${Date.now()}${ext}`);
   if (!(await download(c.url, file, kind === 'video' ? 120 * 1024 * 1024 : 25 * 1024 * 1024, 120))) return null;
-  // make sure the file is really decodable (never leave a grey/blank scene)
   const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width', '-of', 'csv=p=0', file]);
   if (probe.code !== 0 || !parseInt(probe.out)) { try { fs.unlinkSync(file); } catch { /* ignore */ } return null; }
   return { kind, source: c.source, file, page_url: c.page_url, verified_score: score };
+}
+
+export interface StockOpts { minScore?: number; hd?: boolean; exclude?: Set<string>; wide?: boolean; softMin?: number }
+
+export async function findStock(scene: SceneSpec, kind: 'video' | 'photo', workDir: string, cost: CostTracker, i: number | string, o: StockOpts = {}): Promise<SceneSpec['media'] | null> {
+  const hd = !!o.hd;
+  const minScore = o.minScore ?? 7;
+
+  if (!o.wide) {
+    const variants = queryVariants(scene.search_query || scene.visual_description);
+    let lists: Candidate[][] = [];
+    for (const q of variants) {
+      lists = await Promise.all([pexels(q, kind, hd), pixabay(q, kind, hd), wikimedia(q, kind, hd), openverse(q, kind, hd)]);
+      if (o.exclude) lists = lists.map((l) => l.filter((c) => !o.exclude!.has(c.url)));
+      if (lists.reduce((n, l) => n + l.length, 0) >= 2) break;
+    }
+    const cands = interleaveCandidates(lists, o.exclude);
+    if (!cands.length) return null;
+    const { idx, score } = await verifyCandidates(scene, cands, workDir, cost, `${i}_${kind}`, minScore);
+    if (idx < 0) return null;
+    return acceptStock(cands[idx], kind, workDir, i, o.exclude, score);
+  }
+
+  const variants = stockQueryVariants(scene, true);
+  const used = new Set<string>();
+  const soft: { cur: { c: Candidate; score: number } | null } = { cur: null };
+  let visionCalls = 0;
+  let pending: Candidate[][] = [[], [], [], []];
+  const flush = async (tag: string, last: boolean) => {
+    const cands = interleaveCandidates(pending, o.exclude, used, 6);
+    pending = [[], [], [], []];
+    if (!cands.length) return null as SceneSpec['media'] | null;
+    cands.forEach((c) => used.add(c.url));
+    visionCalls++;
+    const { idx, score, bestIdx, bestScore } = await verifyCandidates(scene, cands, workDir, cost, tag, minScore);
+    if (idx >= 0) return acceptStock(cands[idx], kind, workDir, i, o.exclude, score);
+    if (bestIdx >= 0 && bestScore >= (o.softMin ?? 6) && (!soft.cur || bestScore > soft.cur.score)) soft.cur = { c: cands[bestIdx], score: bestScore };
+    if (!last && visionCalls >= 3) return null;
+    return null;
+  };
+
+  for (let vi = 0; vi < variants.length; vi++) {
+    const lists = await Promise.all([pexels(variants[vi], kind, hd), pixabay(variants[vi], kind, hd), wikimedia(variants[vi], kind, hd), openverse(variants[vi], kind, hd)]);
+    lists.forEach((l, si) => { pending[si] = pending[si].concat(l); });
+    const ready = interleaveCandidates(pending, o.exclude, used, 6).length;
+    const last = vi === variants.length - 1;
+    if (ready >= 3 || last) {
+      const got = await flush(`${i}_${kind}_${vi}`, last);
+      if (got) return got;
+      if (visionCalls >= 3) break;
+    }
+  }
+  if (soft.cur) {
+    console.log(`[high stock] scene ${scene.scene_num}: accepted ${kind} from ${soft.cur.c.source} at score ${soft.cur.score} (preferred ${minScore}) query="${variants[0] || ''}"`);
+    return acceptStock(soft.cur.c, kind, workDir, i, o.exclude, soft.cur.score);
+  }
+  console.warn(`[high stock] scene ${scene.scene_num}: no relevant ${kind} after queries ${JSON.stringify(variants.slice(0, 6))}`);
+  return null;
 }
 
 // ------------------------------------------------------------------ 5. photoreal AI images
@@ -678,15 +824,53 @@ export function sceneTiming(scenes: SceneSpec[], words: Word[], duration: number
   return { ranges, boundaries, sceneFrames };
 }
 
+function isRealStock(m?: SceneSpec['media'] | null): boolean {
+  if (!m?.source) return false;
+  const src = m.source.split(':')[0];
+  return src !== 'ai' && src !== 'user' && src !== 'gradient';
+}
+
+/** After per-scene fetch, try leftover High scenes as stock until the guaranteed share is met. */
+export async function fulfillHighStock(scenes: SceneSpec[], workDir: string, cost: CostTracker, cfg: LevelCfg, state: { ai: number; exclude: Set<string> }): Promise<void> {
+  if (cfg.level !== 'high') return;
+  const eligible = scenes.map((s, i) => ({ s, i })).filter(({ s }) => s.media?.source !== 'user');
+  const target = highStockTarget(eligible.length);
+  let have = eligible.filter(({ s }) => isRealStock(s.media)).length;
+  if (have >= target) return;
+  const so: StockOpts = { minScore: cfg.visionMin, hd: cfg.hd, exclude: state.exclude, wide: true, softMin: 6 };
+  for (const { s, i } of eligible) {
+    if (have >= target) break;
+    if (isRealStock(s.media)) continue;
+    const prev = s.media;
+    const m = (await findStock(s, 'video', workDir, cost, `${i}_retry`, so)) || (await findStock(s, 'photo', workDir, cost, `${i}_retry`, so));
+    if (m) {
+      s.media = m;
+      s.media_type = m.kind === 'video' ? 'stock_video' : 'stock_photo';
+      have++;
+      console.log(`[high stock] scene ${s.scene_num}: compensated with ${m.source} ${m.kind}`);
+    } else if (prev) {
+      s.media = prev;
+    }
+  }
+  if (have < target) console.warn(`[high stock] only ${have}/${eligible.length} scenes have internet stock (target ${target})`);
+}
+
 /** Find real media for one scene (stock -> AI photo). Returns null if nothing could be obtained. */
 export async function mediaForScene(s: SceneSpec, i: number, workDir: string, cost: CostTracker, cfg: LevelCfg,
   state: { ai: number; exclude: Set<string> }, force?: 'stock_video' | 'stock_photo' | 'ai_photo'): Promise<SceneSpec['media'] | null> {
   const type = force || s.media_type;
   const so: StockOpts = { minScore: cfg.visionMin, hd: cfg.hd, exclude: state.exclude };
+  if (cfg.level === 'high') { so.wide = true; so.softMin = 6; }
   let m: SceneSpec['media'] | null = null;
-  if (type === 'stock_video') m = (await findStock(s, 'video', workDir, cost, i, so)) || (await findStock(s, 'photo', workDir, cost, i, so));
-  else if (type === 'stock_photo') m = (await findStock(s, 'photo', workDir, cost, i, so)) || (cfg.level !== 'low' ? null : await findStock(s, 'video', workDir, cost, i, so));
+  if (type === 'stock_video' || (cfg.level === 'high' && type === 'stock_photo')) {
+    m = (await findStock(s, 'video', workDir, cost, i, so)) || (await findStock(s, 'photo', workDir, cost, i, so));
+  } else if (type === 'stock_photo') {
+    m = (await findStock(s, 'photo', workDir, cost, i, so)) || (cfg.level !== 'low' ? null : await findStock(s, 'video', workDir, cost, i, so));
+  }
   if (!m && (type === 'ai_photo' || state.ai < cfg.maxAiPhotos)) {
+    if (cfg.level === 'high' && type !== 'ai_photo') {
+      console.warn(`[high stock] scene ${s.scene_num}: no relevant stock for query="${s.search_query || deriveSearchQuery(s)}", falling back to AI photo`);
+    }
     state.ai++;
     const f = path.join(workDir, `scene_${i}_${Date.now()}.png`);
     if (await generateRealPhoto(s.ai_image_prompt || s.visual_description, f, cost, `photo scene ${s.scene_num}`, cfg.image)) m = { kind: 'photo', source: 'ai', file: f };
@@ -760,6 +944,7 @@ export async function runVideoPipeline(inp: PipelineInput): Promise<PipelineResu
     done++;
     inp.onProgress(32 + Math.round((done / scenes.length) * 33), say(`Visuals ${done}/${scenes.length}`, `Кадры ${done}/${scenes.length}`));
   });
+  if (cfg.level === 'high') await fulfillHighStock(scenes, workDir, cost, cfg, state);
   await fillMissingMedia(scenes, workDir);
 
   await assembleVideo({ scenes, words, duration, audioFile, workDir, outVideo: inp.outVideo, outPoster: inp.outPoster, cost, onProgress: inp.onProgress, ru, sceneFrames, ranges, style: inp.style, maxOverlays: cfg.maxOverlays });
