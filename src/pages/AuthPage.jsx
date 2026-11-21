@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
@@ -451,10 +451,10 @@ const AuthPage = () => {
         <div className="w-full max-w-md z-10 text-center pb-2">
           <p className="text-[12px] text-zinc-500 leading-relaxed">
             By continuing, I acknowledge the{' '}
-            <a href="#" className="text-zinc-400 hover:text-white underline">Privacy Policy</a>
+            <Link to="/privacy" className="text-zinc-400 hover:text-white underline">Privacy Policy</Link>
             {' '}and agree to the{' '}
-            <a href="#" className="text-zinc-400 hover:text-white underline">Terms of Use</a>
-            . I also confirm that I am at least 18 years old.
+            <Link to="/terms" className="text-zinc-400 hover:text-white underline">Terms of Service</Link>
+            . I also confirm that I am at least 16 years old.
           </p>
         </div>
       )}

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { Plus, ArrowUp, X, Loader2, Search, ChevronRight, ChevronLeft, Check, MoreVertical, Download, Edit2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
@@ -2362,50 +2362,47 @@ export const MainPage = () => {
             <div className="footer-columns">
               <div className="footer-column">
                 <h4 className="footer-column-title">Company</h4>
-                <a href="#" className="footer-link">Security</a>
-                <a href="#" className="footer-link">Trust Center</a>
-                <a href="#" className="footer-link">Press & Media</a>
-                <a href="#" className="footer-link">Partnerships</a>
+                <Link to="/about" className="footer-link">About</Link>
+                <Link to="/contact" className="footer-link">Contact</Link>
+                <Link to="/security" className="footer-link">Security</Link>
+                <Link to="/trust" className="footer-link">Trust Center</Link>
+                <Link to="/press" className="footer-link">Press &amp; Media</Link>
+                <Link to="/partnerships" className="footer-link">Partnerships</Link>
               </div>
-              
               <div className="footer-column">
                 <h4 className="footer-column-title">Product</h4>
-                <a href="#" className="footer-link">Pricing</a>
-                <a href="#" className="footer-link">Status</a>
-                <a href="#" className="footer-link">Styles</a>
+                <Link to="/upgrade" className="footer-link">Pricing</Link>
+                <Link to="/status" className="footer-link">Status</Link>
+                <Link to="/styles" className="footer-link">Styles</Link>
               </div>
-              
               <div className="footer-column">
                 <h4 className="footer-column-title">Resources</h4>
-                <a href="#" className="footer-link">Support</a>
-                <a href="#" className="footer-link">Guides & Tutorials</a>
-                <a href="#" className="footer-link">Blog</a>
-                <a href="#" className="footer-link">FAQs</a>
+                <Link to="/support" className="footer-link">Support</Link>
+                <Link to="/guides" className="footer-link">Guides &amp; Tutorials</Link>
+                <Link to="/blog" className="footer-link">Blog</Link>
+                <Link to="/faq" className="footer-link">FAQs</Link>
               </div>
-              
               <div className="footer-column">
                 <h4 className="footer-column-title">Legal</h4>
-                <a href="#" className="footer-link">Privacy policy</a>
-                <a href="#" className="footer-link">Do not sell or share my personal information</a>
-                <a href="#" className="footer-link">Cookie settings</a>
-                <a href="#" className="footer-link">Enterprise terms</a>
-                <a href="#" className="footer-link">General terms</a>
-                <a href="#" className="footer-link">Platform rules</a>
-                <a href="#" className="footer-link">Report abuse</a>
-                <a href="#" className="footer-link">Report security concerns</a>
-                <a href="#" className="footer-link">DPA</a>
+                <Link to="/privacy" className="footer-link">Privacy policy</Link>
+                <Link to="/privacy-choices" className="footer-link">Do not sell or share my personal information</Link>
+                <Link to="/cookies" className="footer-link">Cookie settings</Link>
+                <Link to="/enterprise-terms" className="footer-link">Enterprise terms</Link>
+                <Link to="/terms" className="footer-link">General terms</Link>
+                <Link to="/refunds" className="footer-link">Refund policy</Link>
+                <Link to="/rules" className="footer-link">Platform rules</Link>
+                <Link to="/report-abuse" className="footer-link">Report abuse</Link>
+                <Link to="/security-report" className="footer-link">Report security concerns</Link>
+                <Link to="/dpa" className="footer-link">DPA</Link>
               </div>
-              
               <div className="footer-column">
                 <h4 className="footer-column-title">Community</h4>
-                <a href="#" className="footer-link">Discord</a>
-                <a href="#" className="footer-link">TikTok</a>
-                <a href="#" className="footer-link">Reddit</a>
-                <a href="#" className="footer-link">X (Twitter)</a>
-                <a href="#" className="footer-link">YouTube</a>
-                <a href="#" className="footer-link">LinkedIn</a>
+                <Link to="/community" className="footer-link">Community</Link>
+                <Link to="/blog" className="footer-link">Blog</Link>
+                <Link to="/contact" className="footer-link">Feedback</Link>
               </div>
             </div>
+            <div className="footer-bottom">© 2026 nind ai · Create video content. Edit video content. With nind AI.</div>
           </div>
         </footer>
         </div>

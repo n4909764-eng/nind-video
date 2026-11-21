@@ -14,6 +14,8 @@ import { initThemeFromStorage } from "@/components/custom/AppearancePopup";
 
 import HelpSupportPage from "@/pages/HelpSupportPage";
 import SubscriptionSuccessPage from "@/pages/SubscriptionSuccessPage";
+import InfoLayout from "@/pages/info/InfoLayout";
+import { INFO_PAGES } from "@/pages/info/routes";
 
 // Initialize theme from localStorage before render
 if (typeof window !== "undefined") {
@@ -40,6 +42,11 @@ function AppRouter() {
       <Route path="/voice" element={<VoiceAssistantPage />} />
       <Route path="/help" element={<HelpSupportPage />} />
       <Route path="/support-chat" element={<HelpSupportPage />} />
+      <Route path="/terms-of-service" element={<InfoLayout page={INFO_PAGES["/terms"]} />} />
+      <Route path="/privacy-policy" element={<InfoLayout page={INFO_PAGES["/privacy"]} />} />
+      {Object.entries(INFO_PAGES).map(([path, page]) => (
+        <Route key={path} path={path} element={<InfoLayout page={page} />} />
+      ))}
     </Routes>
   );
 }
