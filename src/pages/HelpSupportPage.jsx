@@ -1,15 +1,26 @@
-import { useState, useEffect, useRef } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
-import { ChevronRight, Search, X, Headphones, ArrowUp } from "lucide-react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import { ChevronRight, Search, X, ChevronDown, ChevronUp, Mail } from "lucide-react";
 import { toast } from "sonner";
+import axios from "axios";
 import { useAppLanguage } from "../utils/translations";
+import { FAQ_CATEGORIES, FAQ_ITEMS } from "../data/helpFaqs";
 
-// Slind AI Logo SVG
+const API = `${process.env.REACT_APP_BACKEND_URL || ""}/api`;
+const SUPPORT_EMAIL = "support@nind.pro";
+const COLLAPSED_FULL = 4;
+
 const LogoSvg = ({ className = "h-7 w-auto" }) => (
-  <img src="/assets/nind-logo-white-sm.png" srcSet="/assets/nind-logo-white-sm.png 1x, /assets/nind-logo-white.png 3x" alt="nind" className={className} draggable={false} style={{ height: 32, width: "auto", display: "block" }} />
+  <img
+    src="/assets/nind-logo-white-sm.png"
+    srcSet="/assets/nind-logo-white-sm.png 1x, /assets/nind-logo-white.png 3x"
+    alt="nind"
+    className={className}
+    draggable={false}
+    style={{ height: 32, width: "auto", display: "block" }}
+  />
 );
 
-// Chevron Left Triangle Only Icon (No line)
 const ChevronLeftTriangle = ({ className = "w-5 h-5 text-white" }) => (
   <svg
     viewBox="0 0 24 24"
@@ -24,65 +35,143 @@ const ChevronLeftTriangle = ({ className = "w-5 h-5 text-white" }) => (
   </svg>
 );
 
+function readStoredUser() {
+  try {
+    const raw = localStorage.getItem("slind_user");
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function renderInline(text) {
+  const re = /(\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)]+)\))/g;
+  const out = [];
+  let last = 0;
+  let m;
+  let key = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[2]) {
+      out.push(
+        <strong key={`b${key++}`} className="font-semibold text-white">
+          {m[2]}
+        </strong>
+      );
+    } else {
+      const href = m[4];
+      const internal = href.startsWith("/");
+      out.push(
+        internal ? (
+          <Link key={`l${key++}`} to={href} className="text-[#0F7DFE] underline underline-offset-2">
+            {m[3]}
+          </Link>
+        ) : (
+          <a
+            key={`l${key++}`}
+            href={href}
+            className="text-[#0F7DFE] underline underline-offset-2"
+            target="_blank"
+            rel="noreferrer"
+          >
+            {m[3]}
+          </a>
+        )
+      );
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+function FaqAnswer({ text }) {
+  const blocks = String(text || "").split(/\n\n+/);
+  return (
+    <div className="hs-answer">
+      {blocks.map((block, i) => (
+        <p key={i}>
+          {block.split("\n").map((line, j, arr) => (
+            <span key={j}>
+              {renderInline(line)}
+              {j < arr.length - 1 ? <br /> : null}
+            </span>
+          ))}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function buildMailto({ email, subject, message }) {
+  const body = [`From: ${email || "(not provided)"}`, "", message || ""].join("\n");
+  return `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(subject || "Help & Support")}&body=${encodeURIComponent(body)}`;
+}
+
 export default function HelpSupportPage() {
   const navigate = useNavigate();
   const { t } = useAppLanguage();
-  const [searchParams] = useSearchParams();
-  const activeChatId = searchParams.get("chat");
 
-  const [openFaqId, setOpenFaqId] = useState(null);
-  const [highlightBackButton, setHighlightBackButton] = useState(false);
-  const [showSearchModal, setShowSearchModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [showSupportModal, setShowSupportModal] = useState(false);
-  const [questionText, setQuestionText] = useState("");
+  const [expanded, setExpanded] = useState(false);
+  const [openFaq, setOpenFaq] = useState(null);
+  const [showSupportForm, setShowSupportForm] = useState(false);
+  const [supportSubject, setSupportSubject] = useState("");
+  const [supportMessage, setSupportMessage] = useState("");
+  const [supportEmail, setSupportEmail] = useState("");
+  const [supportFaqId, setSupportFaqId] = useState(undefined);
+  const [sending, setSending] = useState(false);
+  const [highlightBackButton, setHighlightBackButton] = useState(false);
 
   const searchInputRef = useRef(null);
   const backBtnRef = useRef(null);
+  const subjectInputRef = useRef(null);
 
-  // Support Chat state
-  const [supportChats, setSupportChats] = useState(() => {
-    try {
-      const raw = localStorage.getItem("slind_support_chats");
-      return raw ? JSON.parse(raw) : [];
-    } catch (_) {
-      return [];
-    }
-  });
-  const [activeChatMessage, setActiveChatMessage] = useState("");
-
-  // FAQ list with reactive translations
-  const faqItems = [
-    {
-      id: 1,
-      question: t("faqCreditsQ"),
-      answer: t("faqCreditsA"),
-    },
-    {
-      id: 2,
-      question: t("faqHowManyVideosQ"),
-      answer: t("faqHowManyVideosA"),
-    },
-    {
-      id: 3,
-      question: t("faqPrioritySupportQ"),
-      answer: t("faqPrioritySupportA"),
-    },
-    {
-      id: 4,
-      question: t("faqChangeSubQ"),
-      answer: t("faqChangeSubA"),
-    },
-  ];
-
-  // Focus search input when search popup opens
   useEffect(() => {
-    if (showSearchModal) {
-      setTimeout(() => searchInputRef.current?.focus(), 150);
-    }
-  }, [showSearchModal]);
+    const user = readStoredUser();
+    if (user?.email) setSupportEmail(user.email);
+  }, []);
 
-  // Handle "Yes!" click: smooth scroll to top & blue outline on back button
+  const query = searchQuery.trim().toLowerCase();
+  const filteredFaqs = useMemo(() => {
+    if (!query) return FAQ_ITEMS;
+    return FAQ_ITEMS.filter(
+      (item) =>
+        item.question.toLowerCase().includes(query) || item.answer.toLowerCase().includes(query)
+    );
+  }, [query]);
+
+  const closeOverlays = useCallback(() => {
+    setOpenFaq(null);
+    setShowSupportForm(false);
+  }, []);
+
+  useEffect(() => {
+    if (!openFaq && !showSupportForm) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") closeOverlays();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openFaq, showSupportForm, closeOverlays]);
+
+  const openFaqItem = (item) => {
+    setOpenFaq(item);
+  };
+
+  const openSupportForm = (itemOrSubject) => {
+    const item = itemOrSubject && typeof itemOrSubject === "object" ? itemOrSubject : null;
+    const subject = item ? item.question : (itemOrSubject || "");
+    setOpenFaq(null);
+    setSupportFaqId(item?.id);
+    setSupportSubject(subject ? `Help: ${subject}` : "Help & Support");
+    setSupportMessage("");
+    const user = readStoredUser();
+    if (user?.email && !supportEmail) setSupportEmail(user.email);
+    setShowSupportForm(true);
+    setTimeout(() => subjectInputRef.current?.focus(), 150);
+  };
+
   const handleEverythingClearYes = () => {
     window.scrollTo({ top: 0, behavior: "smooth" });
     setHighlightBackButton(true);
@@ -91,193 +180,261 @@ export default function HelpSupportPage() {
     }, 200);
   };
 
-  // Handle "No" click: opens Support Chat popup
-  const handleEverythingClearNo = () => {
-    setShowSupportModal(true);
-  };
-
-  // Handle send in Support Chat popup
-  const handleSendSupportQuestion = () => {
-    if (!questionText.trim()) return;
-
-    const newMsg = {
-      id: `msg_${Date.now()}`,
-      sender: "user",
-      text: questionText.trim(),
-      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    };
-
-    let updatedChats = [...supportChats];
-    let chatIndex = updatedChats.findIndex((c) => c.id === "chat_1");
-
-    if (chatIndex >= 0) {
-      updatedChats[chatIndex].messages.push(newMsg);
-      updatedChats[chatIndex].last_updated = new Date().toISOString();
-    } else {
-      updatedChats.push({
-        id: "chat_1",
-        title: t("chat1") || "Chat 1",
-        created_at: new Date().toISOString(),
-        last_updated: new Date().toISOString(),
-        messages: [newMsg],
-      });
+  const handleSendSupport = async () => {
+    const email = supportEmail.trim();
+    const subject = supportSubject.trim() || "Help & Support";
+    const message = supportMessage.trim();
+    if (!email || !email.includes("@")) {
+      toast.error("Please enter a valid email address.");
+      return;
     }
-
-    localStorage.setItem("slind_support_chats", JSON.stringify(updatedChats));
-    setSupportChats(updatedChats);
-    setQuestionText("");
-    setShowSupportModal(false);
-
-    // Top toast
-    toast.success(t("messageSent") || "Message sent! Check your account for a reply", {
-      position: "top-center",
-      duration: 5000,
-    });
-  };
-
-  // Handle sending reply inside active chat
-  const handleSendChatMessage = () => {
-    if (!activeChatMessage.trim()) return;
-
-    const newMsg = {
-      id: `msg_${Date.now()}`,
-      sender: "user",
-      text: activeChatMessage.trim(),
-      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    };
-
-    let updatedChats = [...supportChats];
-    let chatIndex = updatedChats.findIndex((c) => c.id === (activeChatId || "chat_1"));
-
-    if (chatIndex >= 0) {
-      updatedChats[chatIndex].messages.push(newMsg);
-      updatedChats[chatIndex].last_updated = new Date().toISOString();
-    } else {
-      updatedChats.push({
-        id: activeChatId || "chat_1",
-        title: t("chat1") || "Chat 1",
-        created_at: new Date().toISOString(),
-        last_updated: new Date().toISOString(),
-        messages: [newMsg],
-      });
+    if (!message) {
+      toast.error("Please write a short message.");
+      return;
     }
-
-    localStorage.setItem("slind_support_chats", JSON.stringify(updatedChats));
-    setSupportChats(updatedChats);
-    setActiveChatMessage("");
+    if (sending) return;
+    setSending(true);
+    const user = readStoredUser();
+    const payload = {
+      email,
+      subject,
+      message,
+      user_id: user?.user_id || user?.id || undefined,
+      faq_id: supportFaqId,
+    };
+    const mailto = buildMailto({ email, subject, message });
+    try {
+      const r = await axios.post(`${API}/support`, payload);
+      setShowSupportForm(false);
+      setSupportMessage("");
+      if (r.data?.emailed) {
+        toast.success(`Message sent. We’ll reply to ${email}.`);
+      } else {
+        toast.success("Opening your email app to send the message to support@nind.pro.");
+        window.location.href = r.data?.mailto || mailto;
+      }
+    } catch (err) {
+      // Store failed or endpoint missing: still let the user email support.
+      toast.success("Opening your email app to send the message to support@nind.pro.");
+      setShowSupportForm(false);
+      window.location.href = mailto;
+    } finally {
+      setSending(false);
+    }
   };
 
-  // Filtered FAQ articles for search popup
-  const filteredFaqs = faqItems.filter((item) => {
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return item.question.toLowerCase().includes(q) || item.answer.toLowerCase().includes(q);
-  });
+  const renderQuestionRow = (item) => (
+    <button
+      key={item.id}
+      type="button"
+      className="faq-question-btn"
+      onClick={() => openFaqItem(item)}
+      data-testid={`faq-item-${item.id}`}
+    >
+      <span className="faq-question-text">{item.question}</span>
+      <ChevronRight className="faq-arrow" />
+    </button>
+  );
 
-  const currentChat = supportChats.find((c) => c.id === activeChatId);
-
-  // ==================== SUPPORT CHAT VIEW (FROM ACCOUNT) ====================
-  if (activeChatId && currentChat) {
+  const renderCollapsedList = () => {
+    const flat = FAQ_ITEMS;
+    const full = flat.slice(0, COLLAPSED_FULL);
+    const fifth = flat[COLLAPSED_FULL];
     return (
-      <div className="min-h-screen bg-[#141414] text-white flex flex-col justify-between font-sans">
-        {/* Chat Header */}
-        <div className="w-full max-w-xl mx-auto px-5 py-4 flex items-center justify-between sticky top-0 bg-[#141414] z-10">
-          <button
-            onClick={() => navigate(-1)}
-            className="w-12 h-12 rounded-[18px] bg-[#1D1E20] flex items-center justify-center cursor-pointer active:scale-95 transition-transform"
-          >
-            <ChevronLeftTriangle className="w-5 h-5 text-white" />
-          </button>
-
-          <h2 className="text-xl font-bold text-white tracking-tight">
-            {currentChat.title || "Chat 1"}
-          </h2>
-
-          <div className="w-12 h-12 flex items-center justify-center">
-            <Headphones className="w-6 h-6 text-white" />
-          </div>
-        </div>
-
-        {/* Messages List */}
-        <div className="flex-1 w-full max-w-xl mx-auto px-5 py-6 overflow-y-auto space-y-4">
-          {currentChat.messages?.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"}`}
-            >
-              <div
-                className={`max-w-[85%] rounded-[22px] px-5 py-3.5 text-base leading-relaxed ${
-                  msg.sender === "user"
-                    ? "bg-[#0096FE] text-white rounded-br-sm"
-                    : "bg-[#1D1E20] text-white rounded-bl-sm"
-                }`}
-              >
-                <p className="whitespace-pre-wrap">{msg.text}</p>
-              </div>
-              <span className="text-xs text-[#8E8E93] mt-1.5 px-1">{msg.time}</span>
+      <div className="hs-list" data-testid="faq-collapsed-list">
+        <div className="upgrade-faq-list">
+          {full.map((item) => (
+            <div key={item.id} className="faq-item" style={{ background: "#141414", borderRadius: 26, overflow: "hidden" }}>
+              {renderQuestionRow(item)}
             </div>
           ))}
         </div>
-
-        {/* Input Bar */}
-        <div className="w-full max-w-xl mx-auto px-5 py-4 bg-[#141414] sticky bottom-0">
-          <div className="h-14 rounded-full bg-[#1D1E20] pl-5 pr-2 flex items-center gap-3">
-            <input
-              type="text"
-              value={activeChatMessage}
-              onChange={(e) => setActiveChatMessage(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleSendChatMessage();
-              }}
-              placeholder={t("typeYourQuestion")}
-              className="flex-1 bg-transparent text-base text-white placeholder-[#8E8E93] outline-none"
-            />
+        {fifth ? (
+          <div className="hs-fifth-wrap">
+            <div className="upgrade-faq-list hs-fifth-clip">
+              <div className="faq-item" style={{ background: "#141414", borderRadius: 26, overflow: "hidden" }}>
+                {renderQuestionRow(fifth)}
+              </div>
+            </div>
+            <div className="hs-fifth-fade" />
             <button
-              onClick={handleSendChatMessage}
-              disabled={!activeChatMessage.trim()}
-              className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${
-                activeChatMessage.trim()
-                  ? "bg-white text-black active:scale-95 cursor-pointer"
-                  : "bg-[#2A2B2E] text-[#6E7076] cursor-not-allowed"
-              }`}
+              type="button"
+              className="hs-more-btn"
+              onClick={() => setExpanded(true)}
+              data-testid="faq-more-btn"
             >
-              <ArrowUp className="w-5 h-5 stroke-[2.5]" />
+              More <ChevronDown className="w-4 h-4" strokeWidth={2.5} />
             </button>
           </div>
-        </div>
+        ) : null}
       </div>
     );
-  }
+  };
 
-  // ==================== MAIN HELP & SUPPORT PAGE ====================
+  const renderExpandedList = () => (
+    <div className="hs-list" data-testid="faq-expanded-list">
+      {FAQ_CATEGORIES.map((category) => (
+        <div key={category.id} className="hs-category">
+          <h3 className="hs-category-title">{category.title}</h3>
+          <div className="upgrade-faq-list">
+            {category.items.map((item) => (
+              <div key={item.id} className="faq-item" style={{ background: "#141414", borderRadius: 26, overflow: "hidden" }}>
+                {renderQuestionRow(item)}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="hs-more-btn hs-more-btn-static"
+        onClick={() => {
+          setExpanded(false);
+          searchInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }}
+        data-testid="faq-less-btn"
+      >
+        Less <ChevronUp className="w-4 h-4" strokeWidth={2.5} />
+      </button>
+    </div>
+  );
+
+  const renderSearchResults = () => (
+    <div className="hs-list" data-testid="faq-search-results">
+      {filteredFaqs.length === 0 ? (
+        <div className="py-10 text-center text-sm text-[#8E8E93]">
+          No articles found. Try another search, or send a message to {SUPPORT_EMAIL}.
+        </div>
+      ) : (
+        <div className="upgrade-faq-list">
+          {filteredFaqs.map((item) => (
+            <div key={item.id} className="faq-item" style={{ background: "#141414", borderRadius: 26, overflow: "hidden" }}>
+              {renderQuestionRow(item)}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-[#141414] text-white font-sans selection:bg-[#0096FE]/30">
-      {/* ================= ZONE 1: TOP AREA (OVER THE SEARCH FIELD) ================= */}
+      <style>{`
+        .hs-category { margin-bottom: 28px; }
+        .hs-category-title {
+          font-size: 13px;
+          font-weight: 600;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          color: #8E8E93;
+          margin: 0 0 12px 4px;
+        }
+        .hs-fifth-wrap { position: relative; margin-top: 10px; }
+        .hs-fifth-clip { max-height: 38px; overflow: hidden; pointer-events: none; }
+        .hs-fifth-fade {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(to bottom, rgba(28,29,32,0) 0%, #1C1D20 78%);
+          pointer-events: none;
+        }
+        .hs-more-btn {
+          position: absolute;
+          left: 50%;
+          bottom: 2px;
+          transform: translateX(-50%);
+          z-index: 2;
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 8px 16px;
+          border-radius: 999px;
+          background: #2A2B2E;
+          color: #fff;
+          font-size: 14px;
+          font-weight: 600;
+          border: none;
+          cursor: pointer;
+        }
+        .hs-more-btn:active { transform: translateX(-50%) scale(0.97); }
+        .hs-more-btn-static {
+          position: static;
+          transform: none;
+          margin: 22px auto 0;
+          display: flex;
+        }
+        .hs-more-btn-static:active { transform: scale(0.97); }
+        .hs-answer { font-size: 15px; line-height: 1.55; color: #C8C8CC; }
+        .hs-answer p { margin: 0 0 12px; }
+        .hs-answer p:last-child { margin-bottom: 0; }
+        .hs-popup { max-height: 85vh; overflow: auto; padding-bottom: 36px; }
+        .hs-popup-title {
+          font-size: 20px;
+          font-weight: 700;
+          color: #fff;
+          text-align: left;
+          line-height: 1.3;
+          margin: 8px 0 14px;
+          padding-right: 36px;
+        }
+        .hs-close {
+          position: absolute;
+          top: 16px;
+          right: 16px;
+          width: 36px;
+          height: 36px;
+          border-radius: 50%;
+          background: #1D1E20;
+          color: #fff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border: none;
+          cursor: pointer;
+        }
+        .hs-help-row { display: flex; align-items: center; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
+        .hs-help-label { font-size: 15px; font-weight: 600; color: #fff; margin-right: 4px; }
+        .hs-field {
+          width: 100%;
+          border-radius: 20px;
+          padding: 0 20px;
+          background: #1C1C1E;
+          display: flex;
+          align-items: center;
+          transition: background 0.2s ease;
+          margin-bottom: 12px;
+        }
+        .hs-field:focus-within { background: #2E2F33; }
+        .hs-field input, .hs-field textarea {
+          width: 100%;
+          background: transparent;
+          color: #fff;
+          font-size: 16px;
+          border: none;
+          outline: none;
+        }
+        .hs-field input { height: 56px; }
+        .hs-field textarea { padding: 16px 0; min-height: 120px; resize: vertical; }
+        .hs-field-area { align-items: flex-start; }
+      `}</style>
+
       <div className="bg-[#141414] pt-5 pb-8 px-5">
         <div className="max-w-xl mx-auto">
-          {/* Header Row: Back Button & Logo */}
           <div className="flex items-center justify-between mb-8">
             <button
               ref={backBtnRef}
               onClick={() => navigate(-1)}
               data-testid="help-back-btn"
-              style={
-                highlightBackButton
-                  ? { outline: "1px solid #0096FE", outlineOffset: "2px" }
-                  : undefined
-              }
+              style={highlightBackButton ? { outline: "1px solid #0096FE", outlineOffset: "2px" } : undefined}
               className="w-12 h-12 rounded-[18px] bg-[#1D1E20] flex items-center justify-center cursor-pointer active:scale-95 transition-all"
               title="Back"
             >
               <ChevronLeftTriangle className="w-5 h-5 text-white" />
             </button>
-
             <div className="flex items-center">
               <LogoSvg className="h-7 w-auto text-white opacity-95" />
             </div>
           </div>
 
-          {/* Hero Headline: "How can we [help?]" (increased headline size) */}
           <div className="mb-8">
             <h1 className="text-4xl sm:text-5xl font-bold tracking-tight text-white flex items-center flex-wrap gap-3">
               <span>{t("howCanWe")}</span>
@@ -295,14 +452,30 @@ export default function HelpSupportPage() {
             </h1>
           </div>
 
-          {/* Search Input Pill (100% rounded, taller height) */}
-          <div
-            onClick={() => setShowSearchModal(true)}
-            className="w-full h-14 rounded-full bg-[#1D1E20] hover:bg-[#232427] pl-6 pr-2.5 flex items-center justify-between cursor-pointer transition-colors"
-          >
-            <span className="text-base text-[#8E8E93] select-none">
-              {t("searchQuestion")}
-            </span>
+          <div className="w-full h-14 rounded-full bg-[#1D1E20] focus-within:bg-[#232427] pl-6 pr-2.5 flex items-center justify-between transition-colors">
+            <input
+              ref={searchInputRef}
+              type="search"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={t("searchQuestion")}
+              className="flex-1 bg-transparent text-base text-white placeholder-[#8E8E93] outline-none pr-2"
+              data-testid="faq-search-input"
+              autoComplete="off"
+            />
+            {searchQuery ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery("");
+                  searchInputRef.current?.focus();
+                }}
+                className="w-9 h-9 rounded-full bg-[#2A2B2E] text-white/80 hover:text-white flex items-center justify-center mr-1"
+                aria-label="Clear search"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            ) : null}
             <div className="w-10 h-10 rounded-full bg-white text-black flex items-center justify-center shrink-0">
               <Search className="w-5 h-5 stroke-[2.5]" />
             </div>
@@ -310,209 +483,156 @@ export default function HelpSupportPage() {
         </div>
       </div>
 
-      {/* ================= ZONE 2: BOTTOM AREA (LIGHTER SHADE OF GRAY) ================= */}
       <div className="bg-[#1C1D20] px-5 pt-10 pb-24 min-h-[calc(100vh-270px)]">
         <div className="max-w-xl mx-auto">
-          {/* Section Header: "Frequently Asked Questions" (larger text size) */}
           <h2 className="text-2xl sm:text-3xl font-bold text-white mb-6 text-left tracking-tight">
-            {t("faqTitle")}
+            {query ? "Search results" : t("faqTitle")}
           </h2>
 
-          {/* FAQ Accordion List (original form, sizes and smooth animations from UpgradePage) */}
-          <div className="upgrade-faq-list">
-            {faqItems.map((item) => (
-              <div
-                key={item.id}
-                style={{
-                  background: openFaqId === item.id ? "#161719" : "#141414",
-                  borderRadius: "26px",
-                  overflow: "hidden",
-                  transition: "background 0.3s ease",
-                }}
-                className={`faq-item ${openFaqId === item.id ? "open" : ""}`}
-              >
+          {query ? renderSearchResults() : expanded ? renderExpandedList() : renderCollapsedList()}
+
+          {!query && (
+            <div className="mt-12 pt-8">
+              <h3 className="text-2xl font-bold text-white mb-5 text-left tracking-tight">
+                {t("everythingClear")}
+              </h3>
+              <div className="flex items-center gap-4">
                 <button
-                  className="faq-question-btn"
-                  onClick={() =>
-                    setOpenFaqId(openFaqId === item.id ? null : item.id)
-                  }
+                  type="button"
+                  onClick={handleEverythingClearYes}
+                  data-testid="everything-clear-yes"
+                  className="h-13 px-9 rounded-full bg-white text-black text-base font-semibold hover:bg-white/90 active:scale-95 transition-all cursor-pointer"
                 >
-                  <span className="faq-question-text">{item.question}</span>
-                  <ChevronRight
-                    className={`faq-arrow ${
-                      openFaqId === item.id ? "open" : ""
-                    }`}
-                  />
+                  {t("yesExclamation")}
                 </button>
-
-                <div className="faq-answer-wrapper">
-                  <div className="faq-answer">
-                    {item.answer.split("\n").map((line, idx) => (
-                      <p key={idx}>{line}</p>
-                    ))}
-                  </div>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => openSupportForm("")}
+                  data-testid="everything-clear-no"
+                  className="h-13 px-9 rounded-full bg-[#2A2B2E] text-white text-base font-semibold hover:bg-[#343539] active:scale-95 transition-all cursor-pointer"
+                >
+                  {t("no")}
+                </button>
               </div>
-            ))}
-          </div>
-
-          {/* Everything clear? Section (larger title & larger buttons) */}
-          <div className="mt-12 pt-8">
-            <h3 className="text-2xl font-bold text-white mb-5 text-left tracking-tight">
-              {t("everythingClear")}
-            </h3>
-            <div className="flex items-center gap-4">
-              <button
-                onClick={handleEverythingClearYes}
-                data-testid="everything-clear-yes"
-                className="h-13 px-9 rounded-full bg-white text-black text-base font-semibold hover:bg-white/90 active:scale-95 transition-all cursor-pointer"
-              >
-                {t("yesExclamation")}
-              </button>
-              <button
-                onClick={handleEverythingClearNo}
-                data-testid="everything-clear-no"
-                className="h-13 px-9 rounded-full bg-[#2A2B2E] text-white text-base font-semibold hover:bg-[#343539] active:scale-95 transition-all cursor-pointer"
-              >
-                {t("no")}
-              </button>
             </div>
-          </div>
+          )}
         </div>
       </div>
 
-      {/* ================= 1. SEARCH BOTTOM-SHEET POPUP ================= */}
-      {showSearchModal && (
-        <div
-          className="popup-overlay"
-          onClick={() => setShowSearchModal(false)}
-        >
+      {openFaq && (
+        <div className="popup-overlay" onClick={closeOverlays} data-testid="faq-popup">
           <div
-            className="w-full max-w-[500px] bg-[#141414] rounded-t-[32px] p-6 pb-10 flex flex-col max-h-[85vh] animate-slideUp"
+            className="confirm-popup hs-popup relative"
             onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="faq-popup-title"
           >
-            {/* Standard Project Popup Handle */}
             <div className="popup-handle" />
-
-            {/* Top search input pill inside popup */}
-            <div className="w-full h-14 rounded-full bg-[#1D1E20] pl-5 pr-2 flex items-center justify-between mb-5">
-              <input
-                ref={searchInputRef}
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={t("searchQuestion")}
-                className="flex-1 bg-transparent text-base text-white placeholder-[#8E8E93] outline-none pr-2"
-              />
-              {searchQuery ? (
-                <button
-                  onClick={() => setSearchQuery("")}
-                  className="w-9 h-9 rounded-full bg-[#2A2B2E] text-white/80 hover:text-white flex items-center justify-center mr-1"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              ) : null}
-              <div className="w-10 h-10 rounded-full bg-white text-black flex items-center justify-center shrink-0">
-                <Search className="w-5 h-5 stroke-[2.5]" />
-              </div>
-            </div>
-
-            {/* Articles List */}
-            <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-              {filteredFaqs.length === 0 ? (
-                <div className="py-12 text-center text-sm text-[#8E8E93]">
-                  {t("noArticlesFound")}
-                </div>
-              ) : (
-                filteredFaqs.map((faq) => (
-                  <div
-                    key={faq.id}
-                    style={{
-                      background: openFaqId === faq.id ? "#1C1D20" : "#1D1E20",
-                      borderRadius: "24px",
-                      overflow: "hidden",
-                    }}
-                    className={`faq-item ${openFaqId === faq.id ? "open" : ""}`}
-                  >
-                    <button
-                      className="faq-question-btn"
-                      onClick={() =>
-                        setOpenFaqId(openFaqId === faq.id ? null : faq.id)
-                      }
-                    >
-                      <span className="faq-question-text">{faq.question}</span>
-                      <ChevronRight
-                        className={`faq-arrow ${
-                          openFaqId === faq.id ? "open" : ""
-                        }`}
-                      />
-                    </button>
-                    <div className="faq-answer-wrapper">
-                      <div className="faq-answer">
-                        {faq.answer.split("\n").map((line, idx) => (
-                          <p key={idx}>{line}</p>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                ))
-              )}
+            <button type="button" className="hs-close" onClick={closeOverlays} aria-label="Close" data-testid="faq-popup-close">
+              <X className="w-4 h-4" />
+            </button>
+            <h3 id="faq-popup-title" className="hs-popup-title">
+              {openFaq.question}
+            </h3>
+            <FaqAnswer text={openFaq.answer} />
+            <div className="hs-help-row">
+              <span className="hs-help-label">Did this help?</span>
+              <button
+                type="button"
+                onClick={closeOverlays}
+                className="h-11 px-6 rounded-full bg-white text-black text-sm font-semibold hover:bg-white/90 active:scale-95 transition-all"
+                data-testid="faq-did-help-yes"
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                onClick={() => openSupportForm(openFaq)}
+                className="h-11 px-6 rounded-full bg-[#2A2B2E] text-white text-sm font-semibold hover:bg-[#343539] active:scale-95 transition-all"
+                data-testid="faq-did-help-no"
+              >
+                No
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ================= 2. SUPPORT CHAT BOTTOM-SHEET POPUP (ON "NO") ================= */}
-      {showSupportModal && (
-        <div
-          className="popup-overlay"
-          onClick={() => setShowSupportModal(false)}
-        >
+      {showSupportForm && (
+        <div className="popup-overlay" onClick={() => setShowSupportForm(false)} data-testid="support-form-popup">
           <div
-            className="w-full max-w-[500px] bg-[#141414] rounded-t-[32px] p-6 pb-10 flex flex-col items-center text-center animate-slideUp relative"
+            className="confirm-popup hs-popup relative"
             onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="support-form-title"
           >
-            {/* Standard Project Popup Handle */}
             <div className="popup-handle" />
-
-            {/* Center: Support icon (headphones), title "Support Chat", subtitle "How can we help?" */}
-            <div className="w-16 h-16 rounded-full bg-[#1D1E20] flex items-center justify-center mt-3 mb-4">
-              <Headphones className="w-8 h-8 text-white stroke-[1.75]" />
+            <button
+              type="button"
+              className="hs-close"
+              onClick={() => setShowSupportForm(false)}
+              aria-label="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <div className="w-14 h-14 rounded-full bg-[#1D1E20] flex items-center justify-center mx-auto mt-1 mb-3">
+              <Mail className="w-6 h-6 text-white stroke-[1.75]" />
             </div>
-
-            <h3 className="text-2xl font-bold text-white tracking-tight">
-              {t("supportChat")}
+            <h3 id="support-form-title" className="confirm-popup-title" style={{ marginBottom: 8 }}>
+              Contact support
             </h3>
-            <p className="text-base text-[#8E8E93] mt-1.5 mb-8">
-              {t("howCanWe")} {t("helpWord")}
+            <p className="text-sm text-[#8E8E93] text-center mb-5">
+              Your message will be sent to {SUPPORT_EMAIL}.
             </p>
-
-            {/* Bottom: input "Type your question…" with circular arrow send button */}
-            <div className="w-full h-14 rounded-full bg-[#1D1E20] pl-5 pr-2 flex items-center gap-3">
+            <label className="sr-only" htmlFor="support-email">Your email</label>
+            <div className="hs-field">
               <input
-                type="text"
-                autoFocus
-                value={questionText}
-                onChange={(e) => setQuestionText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleSendSupportQuestion();
-                }}
-                placeholder={t("typeYourQuestion")}
-                className="flex-1 bg-transparent text-base text-white placeholder-[#8E8E93] outline-none"
+                id="support-email"
+                type="email"
+                value={supportEmail}
+                onChange={(e) => setSupportEmail(e.target.value)}
+                placeholder="Your email"
+                autoComplete="email"
+                data-testid="support-email"
               />
-              <button
-                onClick={handleSendSupportQuestion}
-                disabled={!questionText.trim()}
-                className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${
-                  questionText.trim()
-                    ? "bg-white text-black active:scale-95 cursor-pointer"
-                    : "bg-[#2A2B2E] text-[#6E7076] cursor-not-allowed"
-                }`}
-                title="Send"
-              >
-                <ArrowUp className="w-5 h-5 stroke-[2.5]" />
-              </button>
             </div>
+            <label className="sr-only" htmlFor="support-subject">Subject</label>
+            <div className="hs-field">
+              <input
+                id="support-subject"
+                ref={subjectInputRef}
+                type="text"
+                value={supportSubject}
+                onChange={(e) => setSupportSubject(e.target.value)}
+                placeholder="Subject"
+                data-testid="support-subject"
+              />
+            </div>
+            <label className="sr-only" htmlFor="support-message">Message</label>
+            <div className="hs-field hs-field-area">
+              <textarea
+                id="support-message"
+                value={supportMessage}
+                onChange={(e) => setSupportMessage(e.target.value)}
+                placeholder="How can we help?"
+                data-testid="support-message"
+              />
+            </div>
+            <button
+              type="button"
+              disabled={sending}
+              onClick={handleSendSupport}
+              data-testid="support-send"
+              className={`w-full h-14 rounded-full font-semibold text-[16px] flex items-center justify-center transition-all ${
+                sending
+                  ? "bg-[#2C2C2E] text-zinc-500 cursor-not-allowed"
+                  : "bg-white text-black hover:bg-zinc-200 cursor-pointer shadow-md active:scale-[0.99]"
+              }`}
+            >
+              {sending ? "Sending…" : "Send"}
+            </button>
           </div>
         </div>
       )}

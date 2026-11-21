@@ -109,6 +109,18 @@ interface Database {
   whop_payments?: Record<string, string>;    // payment id -> user id (credits granted once per payment)
   whop_checkouts?: Record<string, { user_id: string; plan_key: string; created_at: string }>;
   whop_unmatched?: any[];                    // paid events we could not map to a user (manual review)
+  support_requests?: SupportRequest[];
+}
+
+interface SupportRequest {
+  id: string;
+  user_id?: string;
+  email: string;
+  subject: string;
+  message: string;
+  faq_id?: string;
+  created_at: string;
+  emailed: boolean;
 }
 
 let db: Database = {
@@ -120,6 +132,7 @@ let db: Database = {
   whop_payments: {},
   whop_checkouts: {},
   whop_unmatched: [],
+  support_requests: [],
 };
 
 // Load database from disk
@@ -135,6 +148,7 @@ if (fs.existsSync(DB_FILE)) {
     if (!db.whop_payments) db.whop_payments = {};
     if (!db.whop_checkouts) db.whop_checkouts = {};
     if (!db.whop_unmatched) db.whop_unmatched = [];
+    if (!db.support_requests) db.support_requests = [];
   } catch (e) {
     console.error('Error loading db.json:', e);
   }
@@ -1334,6 +1348,101 @@ app.get('/api/users/:userId/notifications', (_req: Request, res: Response) => {
 
 app.get('/api/users/:userId/team', (_req: Request, res: Response) => {
   res.json({ team: [], members: [] });
+});
+
+// ======================= SUPPORT =======================
+const SUPPORT_INBOX = 'support@nind.pro';
+const SUPPORT_RATE_WINDOW_MS = 10 * 60 * 1000;
+const SUPPORT_RATE_MAX = 5;
+const supportHits: Record<string, number[]> = {};
+
+function smtpReady() {
+  return !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+}
+
+function supportRateOk(key: string) {
+  const now = Date.now();
+  const recent = (supportHits[key] || []).filter((t) => now - t < SUPPORT_RATE_WINDOW_MS);
+  if (recent.length >= SUPPORT_RATE_MAX) {
+    supportHits[key] = recent;
+    return false;
+  }
+  recent.push(now);
+  supportHits[key] = recent;
+  return true;
+}
+
+function buildSupportMailto(email: string, subject: string, message: string) {
+  const body = `From: ${email || '(not provided)'}\n\n${message || ''}`;
+  return `mailto:${SUPPORT_INBOX}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+async function sendSupportMail(entry: SupportRequest): Promise<boolean> {
+  if (!smtpReady()) return false;
+  try {
+    const nodemailer = (await import('nodemailer')).default;
+    const port = Number(process.env.SMTP_PORT || 587);
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port,
+      secure: port === 465,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    });
+    const from = process.env.SUPPORT_FROM || process.env.SMTP_USER || SUPPORT_INBOX;
+    await transporter.sendMail({
+      from,
+      to: SUPPORT_INBOX,
+      replyTo: entry.email,
+      subject: entry.subject,
+      text: `From: ${entry.email}\nUser: ${entry.user_id || '-'}\nFAQ: ${entry.faq_id || '-'}\n\n${entry.message}`,
+    });
+    return true;
+  } catch (e) {
+    console.error('[support] email send failed', e);
+    return false;
+  }
+}
+
+// Body: { email, subject, message, user_id?, faq_id? }
+app.post('/api/support', async (req: Request, res: Response) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const subject = String(req.body?.subject || 'Help & Support').trim().slice(0, 200) || 'Help & Support';
+  const message = String(req.body?.message || '').trim().slice(0, 5000);
+  const userId = String(req.body?.user_id || req.headers['x-user-id'] || '').trim() || undefined;
+  const faqId = String(req.body?.faq_id || '').trim().slice(0, 80) || undefined;
+  if (!email || !email.includes('@') || email.length > 200) {
+    return res.status(400).json({ error: 'invalid_email', message: 'Please enter a valid email address.' });
+  }
+  if (!message) {
+    return res.status(400).json({ error: 'invalid_message', message: 'Please write a short message.' });
+  }
+  if (!supportRateOk(email)) {
+    return res.status(429).json({ error: 'rate_limited', message: 'Please wait a few minutes before sending another message.' });
+  }
+  const entry: SupportRequest = {
+    id: `sup_${crypto.randomBytes(6).toString('hex')}`,
+    user_id: userId,
+    email,
+    subject,
+    message,
+    faq_id: faqId,
+    created_at: new Date().toISOString(),
+    emailed: false,
+  };
+  if (!db.support_requests) db.support_requests = [];
+  db.support_requests.push(entry);
+  saveDb();
+  const emailed = await sendSupportMail(entry);
+  if (emailed) {
+    entry.emailed = true;
+    saveDb();
+  }
+  res.json({
+    ok: true,
+    id: entry.id,
+    emailed,
+    mailto: emailed ? undefined : buildSupportMailto(email, subject, message),
+  });
 });
 
 // ======================= FRONTEND SERVING =======================
