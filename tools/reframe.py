@@ -8,8 +8,9 @@ Frames are decoded by ffmpeg (so rotation is handled exactly like in the final r
 downscaled to 640px wide and analysed at `sample_fps` (default 6):
   1. faces (OpenCV Haar frontal + profile), 2. people (HOG), 3. saliency (motion + edges).
 Shot changes (HSV histogram jumps) reset the virtual camera. Inside a shot the camera
-holds still while the subject stays in a central dead-zone and otherwise follows with a
-speed limit, then a gaussian pass removes jitter.
+holds still while the subject stays in a central dead-zone, ignores small detection
+jitter, and otherwise follows with a critically-damped ease plus velocity and
+acceleration limits; a light gaussian pass then removes residual jitter.
 Output JSON: {"fps": sample_fps, "x": [crop left edge in source pixels per sample], ...}
 """
 import json, subprocess, sys
@@ -40,6 +41,57 @@ def _gauss(a, sigma):
     k /= k.sum()
     pad = np.pad(a, r, mode='edge')
     return np.convolve(pad, k, mode='valid')
+
+
+def _follow(tgt, fps, cw_n):
+    """Dead-zone + critically-damped follow with velocity and acceleration caps.
+
+    Shot cuts are applied by the caller (this runs on one shot). The subject is
+    kept inside the crop with a safety margin so extra smoothness cannot lag them
+    off-screen.
+    """
+    n = len(tgt)
+    if n == 0:
+        return tgt
+    dt = 1.0 / max(fps, 1e-6)
+    half = cw_n / 2
+    dead = cw_n * 0.19   # slightly wider than the old 0.18, still tight enough to follow
+    vmax = 0.55          # frame widths / second (old cap was 0.6)
+    amax = 1.35          # frame widths / second^2 — eases in/out without feeling late
+    omega = 4.0 / 0.50   # critically-damped; ~0.5s settle, not laggy
+    safety = max(half * 0.35, half - cw_n * 0.12)
+    cam = np.zeros(n)
+    p, v = float(tgt[0]), 0.0
+    for j, t in enumerate(tgt):
+        err = t - p
+        if abs(err) <= dead:
+            target = p  # hold; residual velocity is damped by the spring
+        else:
+            # aim just inside the dead-zone, not at the exact subject centre
+            target = t - np.sign(err) * dead * 0.7
+        y0 = p - target
+        ex = np.exp(-omega * dt)
+        # exact step of ÿ + 2ωẏ + ω²y = 0 (stable at our 6 fps sample rate)
+        p_new = target + (y0 + (v + omega * y0) * dt) * ex
+        v_new = (v - omega * (v + omega * y0) * dt) * ex
+        if abs(err) <= dead:
+            v_new *= 0.6
+        dv = np.clip(v_new - v, -amax * dt, amax * dt)
+        v_new = v + dv
+        v_new = float(np.clip(v_new, -vmax, vmax))
+        p_new = p + v_new * dt
+        # if we crossed the aim point, rest there instead of overshooting
+        if (target - p) * (target - p_new) < 0:
+            p_new, v_new = target, 0.0
+        # keep the subject inside the crop (soft clamp on the leftover error)
+        off = t - p_new
+        if abs(off) > safety:
+            p_new = t - np.sign(off) * safety
+            v_new = 0.0 if abs(v_new) < 1e-6 else v_new * 0.3
+        p, v = p_new, v_new
+        cam[j] = p
+    # light blur only — the spring already eases; too much here adds lag
+    return _gauss(cam, sigma=max(0.9, fps * 0.38))
 
 
 def analyze(video, out_json, src_w, src_h, crop_w, fps='6', max_s='0'):
@@ -122,19 +174,10 @@ def analyze(video, out_json, src_w, src_h, crop_w, fps='6', max_s='0'):
             seg[:] = 0.5
         else:
             seg = np.interp(np.arange(len(seg)), idx, seg[idx])
-        # median filter against single-frame false positives
-        k = 2
+        # median filter against single-frame false positives / detection jitter
+        k = 3
         med = np.array([np.median(seg[max(0, j - k):j + k + 1]) for j in range(len(seg))])
-        # virtual camera: dead-zone + speed limit (fraction of frame width per second)
-        dead, vmax = cw_n * 0.18, 0.6 / fps
-        cam = np.zeros(len(med)); p = med[0]
-        for j, t in enumerate(med):
-            d = t - p
-            if abs(d) > dead:
-                step = np.sign(d) * min(abs(d) - dead * 0.5, vmax)
-                p += step
-            cam[j] = p
-        cam = _gauss(cam, sigma=max(1.0, fps * 0.35))
+        cam = _follow(med, fps, cw_n)
         path[a:b] = np.clip(cam, half, 1 - half)
     xs = [int(round((c - half) * src_w / 2)) * 2 for c in path]
     xs = [max(0, min(src_w - crop_w, x)) for x in xs]
