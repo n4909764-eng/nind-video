@@ -3,6 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { Plus, ArrowUp, X, Loader2, Search, ChevronRight, ChevronLeft, Check, MoreVertical, Download, Edit2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
+import { getSessionToken, clearSession } from "../lib/session";
 import ProfilePage from "../components/custom/ProfilePage";
 import UserAvatar from "../components/custom/UserAvatar";
 import StyleDetailPopup from "../components/custom/StyleDetailPopup";
@@ -1232,7 +1233,7 @@ export const MainPage = () => {
     
     try {
       const requestData = {
-        prompt: currentPrompt,
+        prompt: currentPrompt || "Edit my video",
         format_id: selectedFormat?.slug || "auto",
         language: "auto",
         level,
@@ -1266,9 +1267,8 @@ export const MainPage = () => {
         // prompt is sent to the regular generation pipeline.
         const promptLower = (currentPrompt || "").toLowerCase();
         const mockupKeywords = /\b(3d|mockup|mock-up|айфон|iphone|phone\s*frame|на\s*телефон[еа]?|3д|макет|на\s*айфон)\b/i;
-        const isMockupIntent = videoAttachment && (
-          !currentPrompt || mockupKeywords.test(promptLower)
-        );
+        // The 3D phone-mockup renderer is not available yet: every video goes to the real editing pipeline.
+        const isMockupIntent = false && videoAttachment && mockupKeywords.test(promptLower);
 
         if (videoAttachment && isMockupIntent) {
           const response = await axios.post(`${API}/device-mockup/create`, {
@@ -1453,6 +1453,9 @@ export const MainPage = () => {
 
   const handleLogout = () => {
     setUser(null);
+    const sessionToken = getSessionToken();
+    if (sessionToken) axios.post(`${API}/auth/logout`, {}, { headers: { Authorization: `Bearer ${sessionToken}` } }).catch(() => {});
+    clearSession();
     localStorage.removeItem("slind_user");
     setShowProfile(false);
   };

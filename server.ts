@@ -123,7 +123,10 @@ interface Database {
   whop_checkouts?: Record<string, { user_id: string; plan_key: string; created_at: string }>;
   whop_unmatched?: any[];                    // paid events we could not map to a user (manual review)
   support_requests?: SupportRequest[];
+  sessions?: Record<string, SessionRec>;     // sha256(token) -> session
 }
+
+interface SessionRec { user_id: string; created_at: string; expires_at: number }
 
 interface SupportRequest {
   id: string;
@@ -146,6 +149,7 @@ let db: Database = {
   whop_checkouts: {},
   whop_unmatched: [],
   support_requests: [],
+  sessions: {},
 };
 
 // Load database from disk
@@ -162,14 +166,25 @@ if (fs.existsSync(DB_FILE)) {
     if (!db.whop_checkouts) db.whop_checkouts = {};
     if (!db.whop_unmatched) db.whop_unmatched = [];
     if (!db.support_requests) db.support_requests = [];
+    if (!db.sessions) db.sessions = {};
   } catch (e) {
-    console.error('Error loading db.json:', e);
+    // Never start with an empty DB on top of a broken file: keep a copy so nothing is lost.
+    const bad = `${DB_FILE}.corrupt-${Date.now()}`;
+    try { fs.copyFileSync(DB_FILE, bad); } catch (_) {}
+    console.error(`Error loading db.json (copied to ${bad}):`, e);
+    if (process.env.NODE_ENV === 'production') {
+      console.error('Refusing to start with an unreadable database. Restore data/db.json from a backup.');
+      process.exit(1);
+    }
   }
 }
 
+/** Atomic write: a crash mid-write never leaves a half-written db.json. */
 function saveDb() {
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
+    const tmp = `${DB_FILE}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
+    fs.renameSync(tmp, DB_FILE);
   } catch (e) {
     console.error('Error saving db.json:', e);
   }
@@ -181,12 +196,22 @@ const storage = multer.diskStorage({
     cb(null, UPLOADS_DIR);
   },
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.bin';
+    const ext = (path.extname(file.originalname || '').toLowerCase().replace(/[^a-z0-9.]/g, '') || '.bin').slice(0, 8);
     const unique = `${Date.now()}_${crypto.randomBytes(6).toString('hex')}${ext}`;
     cb(null, unique);
   },
 });
-const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } });
+// Only media files may be uploaded (they are served back from our own origin: no .html/.svg/.js).
+const UPLOAD_EXT = /\.(mov|mp4|m4v|webm|mkv|avi|3gp|3g2|mts|m2ts|mpeg|mpg|wmv|qt|png|jpe?g|webp|gif|heic|heif|avif|bmp|mp3|m4a|wav|aac|ogg|oga|opus|flac)$/i;
+const upload = multer({
+  storage,
+  limits: { fileSize: 500 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    const ok = UPLOAD_EXT.test(file.originalname || '') || (file.fieldname === 'chunk');
+    if (!ok) return cb(new Error('unsupported_file_type'));
+    cb(null, true);
+  },
+});
 
 const VIDEO_EXT = /\.(mov|mp4|m4v|webm|mkv|avi|3gp|3g2|mts|m2ts|ts|mpeg|mpg|wmv|qt)$/i;
 
@@ -224,13 +249,80 @@ async function makeUploadThumbnail(srcPath: string, originalName?: string, mime?
 app.post('/api/webhooks/whop', express.raw({ type: '*/*', limit: '2mb' }), (req: Request, res: Response) => handleWhopWebhook(req, res));
 
 // Middleware
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+app.disable('x-powered-by');
+if (process.env.TRUST_PROXY !== '0') app.set('trust proxy', 1); // behind nginx/caddy: real client IP + https
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), microphone=(self)');
+  if (req.secure) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
-// Static uploads serving
-app.use('/api/uploads', express.static(UPLOADS_DIR));
-app.use('/uploads', express.static(UPLOADS_DIR));
+// Static uploads serving (work_* folders hold intermediates/state of jobs and are not public)
+const blockWorkDirs = (req: Request, res: Response, next: any) => (/^\/work_/.test(req.path) ? res.status(404).end() : next());
+app.use('/api/uploads', blockWorkDirs, express.static(UPLOADS_DIR, { dotfiles: 'deny', index: false }));
+app.use('/uploads', blockWorkDirs, express.static(UPLOADS_DIR, { dotfiles: 'deny', index: false }));
 app.use('/assets', express.static(path.resolve(__dirname, 'public/assets')));
+
+// ======================= SESSIONS / RATE LIMITS =======================
+const SESSION_TTL_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
+const hashToken = (t: string) => crypto.createHash('sha256').update(t).digest('hex');
+
+function createSession(userId: string): string {
+  const token = `nsn_${crypto.randomBytes(32).toString('hex')}`;
+  db.sessions![hashToken(token)] = { user_id: userId, created_at: new Date().toISOString(), expires_at: Date.now() + SESSION_TTL_MS };
+  saveDb();
+  return token;
+}
+
+function bearer(req: Request): string {
+  const h = String(req.headers.authorization || '');
+  const m = h.match(/^Bearer\s+(\S+)$/i);
+  return m && m[1] !== 'undefined' && m[1] !== 'null' ? m[1] : '';
+}
+
+/** The signed-in user of this request (server-side session; client-supplied user ids are never trusted). */
+function sessionUser(req: Request): User | undefined {
+  const t = bearer(req);
+  if (!t) return undefined;
+  const rec = db.sessions?.[hashToken(t)];
+  if (!rec) return undefined;
+  if (rec.expires_at < Date.now()) { delete db.sessions![hashToken(t)]; return undefined; }
+  return db.users[rec.user_id];
+}
+
+function requireUser(req: Request, res: Response): User | undefined {
+  const u = sessionUser(req);
+  if (!u) { res.status(401).json({ error: 'auth_required', message: 'Please sign in again.' }); return undefined; }
+  return u;
+}
+
+function dropSessionsOf(userId: string) {
+  for (const [k, v] of Object.entries(db.sessions || {})) if (v.user_id === userId) delete db.sessions![k];
+}
+
+/** Simple in-memory sliding-window limiter. */
+const hits: Record<string, number[]> = {};
+function rateOk(key: string, max: number, windowMs: number): boolean {
+  const now = Date.now();
+  const recent = (hits[key] || []).filter((t) => now - t < windowMs);
+  if (recent.length >= max) { hits[key] = recent; return false; }
+  recent.push(now);
+  hits[key] = recent;
+  return true;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const k of Object.keys(hits)) if (!hits[k].some((t) => now - t < 24 * 3600_000)) delete hits[k];
+  let changed = false;
+  for (const [k, v] of Object.entries(db.sessions || {})) if (v.expires_at < now) { delete db.sessions![k]; changed = true; }
+  if (changed) saveDb();
+}, 3600_000).unref?.();
+const clientIp = (req: Request) => String(req.ip || req.socket.remoteAddress || 'ip');
 
 // ======================= CREDITS =======================
 // $0.01 of real OpenRouter API cost = 1 credit. Real cost is summed per video
@@ -247,19 +339,10 @@ function budgetFor(available: number, capUsd: number) {
   return Math.max(0.01, Math.min(available * USD_PER_CREDIT, capUsd));
 }
 
+/** Lookup only: accounts are created exclusively by e-mail code / Google sign-in. */
 function getOrCreateUser(userId?: string): User | undefined {
   if (!userId) return undefined;
-  if (db.users[userId]) return db.users[userId];
-  // The browser may hold a user created client-side (offline fallback) — register it
-  // server-side instead of silently charging somebody else's account.
-  const u: User = {
-    user_id: userId, id: userId, username: 'Creator', email: '', name: 'Creator',
-    avatar: '/assets/profile-icon.png', role: 'creator', credits: DEFAULT_SIGNUP_CREDITS,
-    created_at: new Date().toISOString(),
-  };
-  db.users[userId] = u;
-  saveDb();
-  return u;
+  return db.users[userId];
 }
 
 function reservedCredits(userId: string): number {
@@ -299,6 +382,53 @@ function chargeProject(project: Project, cost: CostTracker) {
   console.log(`[CREDITS] ${project.id}: $${cost.usd.toFixed(4)} -> ${credits} credits; user ${project.user_id} balance ${user?.credits}`);
   saveDb();
 }
+
+// ======================= JOB QUEUE =======================
+// Rendering is CPU/RAM heavy (ffmpeg, whisper, OpenCV): run at most MAX_CONCURRENT_JOBS at once, queue the rest.
+const MAX_CONCURRENT_JOBS = Math.max(1, Number(process.env.MAX_CONCURRENT_JOBS || 2));
+const MAX_JOBS_PER_USER = Math.max(1, Number(process.env.MAX_JOBS_PER_USER || 2));
+let runningJobs = 0;
+const jobQueue: Array<() => Promise<void>> = [];
+function enqueueJob(fn: () => Promise<void>) {
+  jobQueue.push(fn);
+  pumpJobs();
+}
+function pumpJobs() {
+  while (runningJobs < MAX_CONCURRENT_JOBS && jobQueue.length) {
+    const fn = jobQueue.shift()!;
+    runningJobs++;
+    Promise.resolve()
+      .then(fn)
+      .catch((e) => console.error('[queue] job crashed:', e))
+      .finally(() => { runningJobs--; pumpJobs(); });
+  }
+}
+function activeJobsOf(userId: string) {
+  return Object.values(db.projects).filter((p) => p.user_id === userId && (p.status === 'pending' || p.status === 'processing')).length;
+}
+
+/** After a restart nothing is rendering any more: release reservations and mark interrupted jobs. */
+function recoverInterruptedJobs() {
+  let n = 0;
+  for (const p of Object.values(db.projects)) {
+    if (p.status !== 'pending' && p.status !== 'processing') continue;
+    n++;
+    p.credits_reserved = 0;
+    p.updated_at = new Date().toISOString();
+    if (p.video_url) {
+      // an interrupted edit keeps the previous, working video
+      p.status = 'completed';
+      p.progress = 100;
+      p.error_message = 'Edit was interrupted by a server restart. Please try again.';
+    } else {
+      p.status = 'failed';
+      p.error = 'interrupted';
+      p.error_message = 'Generation was interrupted by a server restart. Please try again (no credits were charged for the unfinished part).';
+    }
+  }
+  if (n) { console.warn(`[startup] ${n} interrupted job(s) marked as failed/restored`); saveDb(); }
+}
+recoverInterruptedJobs();
 
 // Video Generation Worker
 async function processVideoGeneration(projectId: string, isModification = false, modificationPrompt = '', budgetUsd?: number, editAttachments: string[] = []) {
@@ -439,113 +569,114 @@ async function processVideoGeneration(projectId: string, isModification = false,
 
 // Base Health Check
 app.get('/api', (_req: Request, res: Response) => {
-  res.json({ message: 'Slind AI API', status: 'ok' });
+  res.json({ message: 'nind ai API', status: 'ok' });
 });
 
 // Auth & Session Endpoints
-app.post('/api/auth/session', (req: Request, res: Response) => {
-  const token = req.body?.session_token || `guest_${crypto.randomBytes(8).toString('hex')}`;
-  const userId = `usr_${crypto.randomBytes(6).toString('hex')}`;
-  const user: User = {
-    user_id: userId,
-    id: userId,
-    username: 'Guest Creator',
-    email: 'guest@slind.ai',
-    name: 'Guest Creator',
-    avatar: '/assets/profile-icon.png',
-    role: 'creator',
-    credits: DEFAULT_SIGNUP_CREDITS,
-    created_at: new Date().toISOString(),
-  };
-
-  db.users[userId] = user;
-  saveDb();
-
-  res.json({
-    user,
-    session_token: token,
-    session_id: token,
-  });
-});
+// Accounts are created only through a verified e-mail code or Google sign-in.
+// The old guest/login/register shortcuts (no verification) are gone.
+const goneAuth = (_req: Request, res: Response) => res.status(410).json({ error: 'gone', message: 'Please sign in with your e-mail code or Google.' });
+app.post('/api/auth/session', goneAuth);
+app.post('/api/auth/register', goneAuth);
+app.post('/api/auth/login', goneAuth);
 
 app.get('/api/auth/me', (req: Request, res: Response) => {
-  const authHeader = req.headers.authorization;
-  const userId = req.headers['x-user-id'] as string;
-  let user: User | undefined;
-
-  if (userId && db.users[userId]) {
-    user = db.users[userId];
-  } else {
-    // Return first user or default active session
-    const users = Object.values(db.users);
-    user = users.length > 0 ? users[users.length - 1] : undefined;
-  }
-
-  if (!user) {
-    const defaultId = 'usr_default';
-    user = {
-      user_id: defaultId,
-      id: defaultId,
-      username: 'Slind Creator',
-      email: 'creator@slind.ai',
-      name: 'Slind Creator',
-      avatar: '/assets/profile-icon.png',
-      role: 'creator',
-      credits: DEFAULT_SIGNUP_CREDITS,
-      created_at: new Date().toISOString(),
-    };
-    db.users[defaultId] = user;
-    saveDb();
-  }
-
-  res.json({ user: publicUser(user) });
+  const user = requireUser(req, res);
+  if (!user) return;
+  res.json({ user: publicUser(user, { available_credits: availableCredits(user) }) });
 });
 
 // Confirmation OTP codes storage
-const authCodes: Record<string, { code: string; expires_at: number; mode: string }> = {};
+const authCodes: Record<string, { code: string; expires_at: number; mode: string; attempts: number }> = {};
+const CODE_MAX_ATTEMPTS = 5;
 
-app.post('/api/auth/send-code', (req: Request, res: Response) => {
-  const { email, mode = 'signup' } = req.body;
-  if (!email || !email.includes('@')) {
+/** Universal dev code 123456 / code in the response: local development only, never on an https deployment. */
+function devAuthCodes() {
+  const httpsDeploy = /^https:\/\//i.test(process.env.PUBLIC_URL || '');
+  return !httpsDeploy && (process.env.DEV_AUTH_CODES === '1' || process.env.NODE_ENV !== 'production');
+}
+
+function mailTransport() {
+  if (!smtpReady()) return null;
+  return import('nodemailer').then(({ default: nodemailer }) => {
+    const port = Number(process.env.SMTP_PORT || 587);
+    return nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port,
+      secure: port === 465,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    });
+  });
+}
+
+async function sendLoginCodeMail(email: string, code: string): Promise<boolean> {
+  const tp = mailTransport();
+  if (!tp) return false;
+  try {
+    const transporter = await tp;
+    const from = process.env.MAIL_FROM || process.env.SUPPORT_FROM || process.env.SMTP_USER || 'no-reply@nind.pro';
+    await transporter.sendMail({
+      from,
+      to: email,
+      subject: `${code} is your nind ai code`,
+      text: `Your nind ai confirmation code is ${code}\n\nIt expires in 15 minutes. If you didn't request it, just ignore this e-mail.\n\nnind ai — https://nind.pro`,
+      html: `<div style="font-family:Arial,sans-serif;font-size:15px;color:#111"><p>Your <b>nind ai</b> confirmation code:</p><p style="font-size:28px;font-weight:700;letter-spacing:4px">${code}</p><p>It expires in 15 minutes. If you didn't request it, just ignore this e-mail.</p></div>`,
+    });
+    return true;
+  } catch (e: any) {
+    console.error('[auth] code e-mail failed:', e?.message || e);
+    return false;
+  }
+}
+
+app.post('/api/auth/send-code', async (req: Request, res: Response) => {
+  const { email, mode = 'signup' } = req.body || {};
+  const normalized = String(email || '').toLowerCase().trim();
+  if (!normalized || normalized.length > 200 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
     return res.status(400).json({ error: 'Valid email is required' });
   }
+  if (!rateOk(`code:${normalized}`, 5, 15 * 60_000) || !rateOk(`codeip:${clientIp(req)}`, 20, 60 * 60_000)) {
+    return res.status(429).json({ error: 'Too many codes requested. Please wait a few minutes.' });
+  }
 
-  const normalized = email.toLowerCase().trim();
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  authCodes[normalized] = {
-    code,
-    expires_at: Date.now() + 15 * 60 * 1000,
-    mode,
-  };
+  const code = crypto.randomInt(100000, 1000000).toString();
+  authCodes[normalized] = { code, expires_at: Date.now() + 15 * 60 * 1000, mode: String(mode), attempts: 0 };
 
-  const devCodes = process.env.DEV_AUTH_CODES === '1' || process.env.NODE_ENV !== 'production';
-  if (devCodes) console.log(`[AUTH] Confirmation code for ${normalized}: ${code}`);
-  const payload: { success: boolean; message: string; code?: string } = {
-    success: true,
-    message: `Confirmation code sent to ${normalized}`,
-  };
-  if (devCodes) payload.code = code;
-  res.json(payload);
+  const dev = devAuthCodes();
+  if (dev) {
+    console.log(`[AUTH] Confirmation code for ${normalized}: ${code}`);
+    return res.json({ success: true, message: `Confirmation code sent to ${normalized}`, code });
+  }
+  const sent = await sendLoginCodeMail(normalized, code);
+  if (!sent) {
+    delete authCodes[normalized];
+    return res.status(503).json({ error: 'We could not send the e-mail right now. Please try again or continue with Google.' });
+  }
+  res.json({ success: true, message: `Confirmation code sent to ${normalized}` });
 });
 
 app.post('/api/auth/verify-code', (req: Request, res: Response) => {
-  const { email, code, mode = 'signup' } = req.body;
+  const { email, code, mode = 'signup' } = req.body || {};
   if (!email || !code) {
     return res.status(400).json({ error: 'Email and code are required' });
   }
+  if (!rateOk(`verifyip:${clientIp(req)}`, 30, 15 * 60_000)) {
+    return res.status(429).json({ error: 'Too many attempts. Please wait a few minutes.' });
+  }
 
-  const normalized = email.toLowerCase().trim();
+  const normalized = String(email).toLowerCase().trim();
   const entry = authCodes[normalized];
-  const devCodes = process.env.DEV_AUTH_CODES === '1' || process.env.NODE_ENV !== 'production';
-  const isValid = (devCodes && code === '123456') || (entry && entry.code === code && entry.expires_at > Date.now());
+  const given = String(code).trim();
+  const isValid = (devAuthCodes() && given === '123456') || (!!entry && entry.code === given && entry.expires_at > Date.now());
 
   if (!isValid) {
+    if (entry && ++entry.attempts >= CODE_MAX_ATTEMPTS) delete authCodes[normalized];
     return res.status(400).json({ error: 'Invalid or expired confirmation code' });
   }
 
   delete authCodes[normalized];
 
-  let user = Object.values(db.users).find((u) => u.email.toLowerCase() === normalized);
+  let user = Object.values(db.users).find((u) => (u.email || '').toLowerCase() === normalized);
 
   if (!user) {
     const userId = `usr_${crypto.randomBytes(6).toString('hex')}`;
@@ -564,77 +695,45 @@ app.post('/api/auth/verify-code', (req: Request, res: Response) => {
     saveDb();
   }
 
+  const token = createSession(user.user_id);
   res.json({
     success: true,
-    user,
-    token: `token_${user.user_id}`,
+    user: publicUser(user, { token }),
+    token,
     message: mode === 'signup' ? 'Account created successfully' : 'Welcome back!',
   });
 });
 
-app.post('/api/auth/register', (req: Request, res: Response) => {
-  const { email, password, username, name } = req.body;
-  const userId = `usr_${crypto.randomBytes(6).toString('hex')}`;
-  const newUser: User = {
-    user_id: userId,
-    id: userId,
-    username: username || email?.split('@')[0] || 'Creator',
-    email: email || 'user@slind.ai',
-    name: name || username || 'Creator',
-    avatar: '/assets/profile-icon.png',
-    role: 'creator',
-    credits: DEFAULT_SIGNUP_CREDITS,
-    created_at: new Date().toISOString(),
-  };
-
-  db.users[userId] = newUser;
-  saveDb();
-
-  res.json({
-    user: newUser,
-    token: `token_${userId}`,
-    message: 'Registered successfully',
-  });
-});
-
-app.post('/api/auth/login', (req: Request, res: Response) => {
-  const { email } = req.body;
-  let user = Object.values(db.users).find((u) => u.email === email);
-
-  if (!user) {
-    const userId = `usr_${crypto.randomBytes(6).toString('hex')}`;
-    user = {
-      user_id: userId,
-      id: userId,
-      username: email?.split('@')[0] || 'Creator',
-      email: email || 'creator@slind.ai',
-      name: email?.split('@')[0] || 'Creator',
-      avatar: '/assets/profile-icon.png',
-      role: 'creator',
-      credits: DEFAULT_SIGNUP_CREDITS,
-      created_at: new Date().toISOString(),
-    };
-    db.users[userId] = user;
-    saveDb();
-  }
-
-  res.json({
-    user,
-    token: `token_${user.user_id}`,
-    message: 'Logged in successfully',
-  });
-});
-
-app.post('/api/auth/logout', (_req: Request, res: Response) => {
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  const t = bearer(req);
+  if (t && db.sessions?.[hashToken(t)]) { delete db.sessions[hashToken(t)]; saveDb(); }
   res.json({ success: true, message: 'Logged out' });
 });
 
+/** Removes a project's rendered files and its work folder. */
+function removeProjectFiles(p: Project) {
+  const files = [p.video_url, p.poster_url, p.audio_url, p.source_video_url, ...(p.product_images || [])]
+    .filter((u): u is string => typeof u === 'string' && u.startsWith('/api/uploads/'))
+    .map((u) => path.resolve(UPLOADS_DIR, path.basename(u)));
+  for (const f of files) { try { if (f.startsWith(UPLOADS_DIR + path.sep) && fs.existsSync(f)) fs.unlinkSync(f); } catch (_) {} }
+  try { fs.rmSync(path.join(UPLOADS_DIR, `work_${path.basename(p.id)}`), { recursive: true, force: true }); } catch (_) {}
+  try { fs.rmSync(path.join(UPLOADS_DIR, `voiceover_${path.basename(p.id)}.mp3`), { force: true }); } catch (_) {}
+}
+
+// Account deletion: user, sessions, videos and their files.
 app.delete('/api/auth/me', (req: Request, res: Response) => {
-  const userId = req.headers['x-user-id'] as string;
-  if (userId && db.users[userId]) {
-    delete db.users[userId];
-    saveDb();
+  const user = requireUser(req, res);
+  if (!user) return;
+  const busy = Object.values(db.projects).some((p) => p.user_id === user.user_id && (p.status === 'processing' || p.status === 'pending'));
+  if (busy) return res.status(409).json({ error: 'busy', message: 'Wait until your videos finish rendering, then try again.' });
+  for (const p of Object.values(db.projects)) {
+    if (p.user_id !== user.user_id) continue;
+    removeProjectFiles(p);
+    delete db.projects[p.id];
   }
+  dropSessionsOf(user.user_id);
+  delete db.users[user.user_id];
+  saveDb();
   res.json({ success: true });
 });
 
@@ -674,7 +773,8 @@ app.get('/api/auth/google/start', (req: Request, res: Response) => {
 app.get('/api/auth/google/callback', async (req: Request, res: Response) => {
   await handleGoogleCallback(req, res, authOrigin(req, publicUrl(req)), (profile) => {
     const user = findOrCreateGoogleUser(profile);
-    return { user: publicUser(user), token: `token_${user.user_id}` };
+    const token = createSession(user.user_id);
+    return { user: publicUser(user, { token }), token };
   });
 });
 
@@ -759,7 +859,6 @@ app.post('/api/video/generate', async (req: Request, res: Response) => {
     logo_url,
     product_images,
     subtitle_style = 'style_a',
-    user_id,
     level: rawLevel,
     voice,
     style,
@@ -771,10 +870,16 @@ app.post('/api/video/generate', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Prompt is required' });
   }
 
+  if (prompt.length > 4000) return res.status(400).json({ error: 'Prompt is too long (max 4000 characters).' });
   const isRussian = String(language).toLowerCase().startsWith('ru');
-  const effectiveUserId = user_id || (req.headers['x-user-id'] as string) || 'usr_default';
-  const targetUser = getOrCreateUser(effectiveUserId);
-  if (!targetUser) return res.status(401).json({ error: 'Not signed in' });
+  const targetUser = requireUser(req, res);
+  if (!targetUser) return;
+  if (!rateOk(`gen:${targetUser.user_id}`, 20, 60 * 60_000)) {
+    return res.status(429).json({ error: 'rate_limited', message: 'Too many videos started in the last hour. Please wait a bit.' });
+  }
+  if (activeJobsOf(targetUser.user_id) >= MAX_JOBS_PER_USER) {
+    return res.status(429).json({ error: 'busy', message: `You already have ${MAX_JOBS_PER_USER} videos rendering. Wait for one to finish.` });
+  }
 
   // Real cost is charged after rendering ($0.01 = 1 credit); to start, the user must hold
   // enough credits to cover a typical video.
@@ -827,8 +932,13 @@ app.post('/api/video/generate', async (req: Request, res: Response) => {
     }
   }
 
+  // the probe above is async: re-check the balance now so parallel requests can't spend the same credits twice
+  const availableNow = availableCredits(targetUser);
+  if (availableNow < MIN_GENERATION_CREDITS || activeJobsOf(targetUser.user_id) >= MAX_JOBS_PER_USER) {
+    return res.status(402).json({ error: 'Insufficient credits', message: `Not enough free credits right now (${availableNow} available).`, required: MIN_GENERATION_CREDITS, current: availableNow });
+  }
   const projectId = `proj_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-  const budgetUsd = budgetFor(available, capUsd);
+  const budgetUsd = budgetFor(availableNow, capUsd);
   const newProject: Project = {
     id: projectId,
     user_id: targetUser.user_id,
@@ -847,9 +957,9 @@ app.post('/api/video/generate', async (req: Request, res: Response) => {
     status: 'pending',
     progress: 5,
     progress_message: isRussian ? 'В очереди на генерацию...' : 'Queued for generation...',
-    source_video_url,
-    logo_url,
-    product_images,
+    source_video_url: typeof source_video_url === 'string' ? source_video_url : undefined,
+    logo_url: typeof logo_url === 'string' ? logo_url : undefined,
+    product_images: Array.isArray(product_images) ? product_images.filter((u: any) => typeof u === 'string').slice(0, 20) : undefined,
     subtitle_style,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -859,9 +969,7 @@ app.post('/api/video/generate', async (req: Request, res: Response) => {
   saveDb();
 
   // Run generation in background
-  setTimeout(() => {
-    processVideoGeneration(projectId, false, '', budgetUsd);
-  }, 100);
+  enqueueJob(() => processVideoGeneration(projectId, false, '', budgetUsd));
 
   res.json({
     id: projectId,
@@ -882,14 +990,28 @@ app.get('/api/video/:id', (req: Request, res: Response) => {
   if (!project) {
     return res.status(404).json({ error: 'Project not found' });
   }
-  res.json(project);
+  const me = sessionUser(req);
+  if (me && project.user_id === me.user_id) return res.json(project);
+  // shared link: the video itself, not the owner's account data / edit internals
+  const { source_state: _s, cost_breakdown: _c, user_id: _u, credits_reserved: _r, edit_notes: _n, ...pub } = project;
+  res.json(pub);
 });
+
+function ownProject(req: Request, res: Response): { user: User; project: Project } | undefined {
+  const user = requireUser(req, res);
+  if (!user) return undefined;
+  const project = db.projects[req.params.id];
+  if (!project || project.user_id !== user.user_id) { res.status(404).json({ error: 'Project not found' }); return undefined; }
+  return { user, project };
+}
 
 // Modify Video Project
 app.post('/api/video/:id/modify', (req: Request, res: Response) => {
-  const original = db.projects[req.params.id];
-  if (!original) {
-    return res.status(404).json({ error: 'Project not found' });
+  const own = ownProject(req, res);
+  if (!own) return;
+  const original = own.project;
+  if (!rateOk(`gen:${own.user.user_id}`, 20, 60 * 60_000)) {
+    return res.status(429).json({ error: 'rate_limited', message: 'Too many edits in the last hour. Please wait a bit.' });
   }
 
   const newPrompt = req.body.prompt || original.prompt;
@@ -901,8 +1023,7 @@ app.post('/api/video/:id/modify', (req: Request, res: Response) => {
 
   // Edits are charged by real API cost too ($0.01 = 1 credit) when they finish.
   let editBudget = 0.3;
-  const ownerId = original.user_id || (req.headers['x-user-id'] as string);
-  const targetUser = getOrCreateUser(ownerId);
+  const targetUser = own.user;
   if (targetUser) {
     if (original.status === 'processing' || original.status === 'pending') {
       return res.status(409).json({ error: 'busy', message: 'This video is still being processed.' });
@@ -942,9 +1063,7 @@ app.post('/api/video/:id/modify', (req: Request, res: Response) => {
 
   saveDb();
 
-  setTimeout(() => {
-    processVideoGeneration(original.id, true, newPrompt, editBudget, editFiles);
-  }, 100);
+  enqueueJob(() => processVideoGeneration(original.id, true, newPrompt, editBudget, editFiles));
 
   res.json({
     ...original,
@@ -966,38 +1085,59 @@ app.post('/api/video/:id/export', (req: Request, res: Response) => {
 });
 
 // Video Library
-app.get('/api/videos', (_req: Request, res: Response) => {
-  const list = Object.values(db.projects).sort(
+app.get('/api/videos', (req: Request, res: Response) => {
+  const me = requireUser(req, res);
+  if (!me) return;
+  const list = Object.values(db.projects).filter((p) => p.user_id === me.user_id).sort(
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
   );
   res.json({ projects: list });
 });
 
 app.get('/api/videos/user/:userId', (req: Request, res: Response) => {
-  const userId = req.params.userId;
+  const me = requireUser(req, res);
+  if (!me) return;
+  if (req.params.userId !== me.user_id) return res.status(403).json({ error: 'forbidden' });
+  const userId = me.user_id;
   const list = Object.values(db.projects)
-    .filter((p) => p.user_id === userId || !p.user_id)
+    .filter((p) => p.user_id === userId)
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
   res.json({ projects: list });
 });
 
 app.patch('/api/videos/:id', (req: Request, res: Response) => {
-  const project = db.projects[req.params.id];
-  if (!project) return res.status(404).json({ error: 'Not found' });
-  if (req.body.prompt) project.prompt = req.body.prompt;
+  const own = ownProject(req, res);
+  if (!own) return;
+  const project = own.project;
+  if (typeof req.body.prompt === 'string') project.prompt = req.body.prompt.slice(0, 4000);
   project.updated_at = new Date().toISOString();
   saveDb();
   res.json(project);
 });
 
 app.delete('/api/videos/:id', (req: Request, res: Response) => {
-  delete db.projects[req.params.id];
+  const own = ownProject(req, res);
+  if (!own) return;
+  if (own.project.status === 'processing' || own.project.status === 'pending') {
+    return res.status(409).json({ error: 'busy', message: 'This video is still rendering.' });
+  }
+  removeProjectFiles(own.project);
+  delete db.projects[own.project.id];
   saveDb();
   res.json({ success: true });
 });
 
 // File Uploads
-app.post('/api/upload', upload.single('file'), async (req: Request, res: Response) => {
+/** Auth + per-user rate limit in front of multer, so anonymous clients can't fill the disk. */
+function uploadGate(req: Request, res: Response, next: any) {
+  const user = requireUser(req, res);
+  if (!user) return;
+  if (!rateOk(`upl:${user.user_id}`, 120, 60 * 60_000)) return res.status(429).json({ error: 'rate_limited', message: 'Too many uploads. Please wait a bit.' });
+  (req as any).nindUser = user;
+  next();
+}
+
+app.post('/api/upload', uploadGate, upload.single('file'), async (req: Request, res: Response) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
@@ -1014,34 +1154,45 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
 
 // Chunked Uploads
 app.post('/api/upload/init', (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) return;
   const { filename, total_chunks } = req.body;
+  // basename only + media extension only (prevents ../ path traversal when the chunks are assembled)
+  const safeName = path.basename(String(filename || 'file.bin')).replace(/[^\w.\-]+/g, '_').slice(-80);
+  if (!UPLOAD_EXT.test(safeName)) return res.status(415).json({ error: 'unsupported_file_type', message: 'Please upload a video, image or audio file.' });
+  const chunks = Math.floor(Number(total_chunks) || 1);
+  if (chunks < 1 || chunks > 200) return res.status(400).json({ error: 'invalid_chunks' });
   const uploadId = `upl_${crypto.randomBytes(8).toString('hex')}`;
   db.chunk_uploads[uploadId] = {
-    total_chunks: total_chunks || 1,
+    total_chunks: chunks,
     chunks: {},
-    filename: filename || 'file.bin',
-  };
+    filename: safeName,
+    user_id: user.user_id,
+  } as any;
   saveDb();
   res.json({ upload_id: uploadId });
 });
 
-app.post('/api/upload/chunk', upload.single('chunk'), (req: Request, res: Response) => {
+app.post('/api/upload/chunk', uploadGate, upload.single('chunk'), (req: Request, res: Response) => {
   const { upload_id, chunk_index } = req.body;
-  const uploadSession = db.chunk_uploads[upload_id];
-  if (!uploadSession || !req.file) {
+  const uploadSession = db.chunk_uploads[upload_id] as any;
+  const idx = Number(chunk_index);
+  if (!uploadSession || !req.file || uploadSession.user_id !== (req as any).nindUser.user_id || !Number.isInteger(idx) || idx < 0 || idx >= uploadSession.total_chunks) {
+    if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
     return res.status(400).json({ error: 'Invalid upload session or chunk' });
   }
 
-  uploadSession.chunks[Number(chunk_index)] = req.file.path;
+  uploadSession.chunks[idx] = req.file.path;
   res.json({ success: true, chunk_index });
 });
 
 app.post('/api/upload/complete', (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) return;
   const uploadId = (req.query.upload_id as string) || req.body.upload_id;
-  const session = db.chunk_uploads[uploadId];
-  if (!session) return res.status(404).json({ error: 'Upload session not found' });
-
-  const finalName = `${Date.now()}_${session.filename}`;
+  const session = db.chunk_uploads[uploadId] as any;
+  if (!session || session.user_id !== user.user_id) return res.status(404).json({ error: 'Upload session not found' });
+  const finalName = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}_${path.basename(session.filename)}`;
   const finalPath = path.join(UPLOADS_DIR, finalName);
   const writeStream = fs.createWriteStream(finalPath);
 
@@ -1075,130 +1226,14 @@ app.post('/api/upload/complete', (req: Request, res: Response) => {
   });
 });
 
-// Device Mockup Creation
-app.post('/api/device-mockup/create', (req: Request, res: Response) => {
-  const { media_url, device_type = 'iphone16', background = 'gradient' } = req.body;
-  const projectId = `mockup_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-
-  const newProject: Project = {
-    id: projectId,
-    prompt: `Device Mockup: ${device_type}`,
-    format_id: 'device_mockup',
-    language: 'ru',
-    status: 'pending',
-    progress: 10,
-    progress_message: 'Создаём 3D мокап смартфона...',
-    source_video_url: media_url,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
-
-  db.projects[projectId] = newProject;
-  saveDb();
-
-  setTimeout(async () => {
-    try {
-      newProject.status = 'processing';
-      newProject.progress = 50;
-      newProject.progress_message = 'Рендерим кадры iPhone...';
-      saveDb();
-
-      const outputName = `video_${projectId}.mp4`;
-      const outputPath = path.join(UPLOADS_DIR, outputName);
-
-      // Create a vertical 9:16 video featuring the mockup aesthetic
-      await new Promise((resolve) => {
-        const ff = spawn('ffmpeg', [
-          '-y',
-          '-f',
-          'lavfi',
-          '-i',
-          'color=c=0x0F172A:s=720x1280:d=4',
-          '-vf',
-          `drawbox=x=110:y=140:w=500:h=1000:color=white@0.1:t=fill,drawbox=x=120:y=150:w=480:h=980:color=0x1E293B:t=fill,drawtext=text='iPhone 16 Pro':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=240,drawtext=text='Live Preview':fontsize=28:fontcolor=0x0096FE:x=(w-text_w)/2:y=620`,
-          '-c:v',
-          'libx264',
-          '-pix_fmt',
-          'yuv420p',
-          '-r',
-          '30',
-          outputPath,
-        ]);
-        ff.on('close', () => resolve(true));
-        ff.on('error', () => resolve(false));
-      });
-
-      newProject.status = 'completed';
-      newProject.progress = 100;
-      newProject.progress_message = 'Готово!';
-      newProject.video_url = `/api/uploads/${outputName}`;
-      newProject.poster_url = `/api/uploads/${outputName}`;
-      saveDb();
-    } catch (e: any) {
-      newProject.status = 'failed';
-      newProject.error_message = e.message;
-      saveDb();
-    }
-  }, 200);
-
-  res.json({ id: projectId, project_id: projectId });
-});
-
-// Montage Creation & Styles
-app.get('/api/montage/styles', (_req: Request, res: Response) => {
-  res.json({
-    styles: [
-      { id: 'classic_fast', name: 'Динамичный ритм', bpm: 128 },
-      { id: 'cinematic', name: 'Кинематографичный', bpm: 90 },
-      { id: 'glitch_trap', name: 'Глитч & Трэп', bpm: 140 },
-    ],
-  });
-});
-
-app.post('/api/montage/create', (req: Request, res: Response) => {
-  const { prompt, style = 'classic_fast' } = req.body;
-  const montageId = `montage_${Date.now()}`;
-  res.json({ montage_id: montageId, status: 'processing' });
-});
-
-app.get('/api/montage/:id', (req: Request, res: Response) => {
-  res.json({ id: req.params.id, status: 'completed' });
-});
-
-// Voice Transcription Endpoint
-app.post('/api/voice/transcribe', upload.single('audio'), async (req: Request, res: Response) => {
-  try {
-    // If audio was submitted, return transcribed text or guidance
-    res.json({
-      text: 'Создай динамичное рекламное видео о новом продукте со стильными субтитрами и эффектами',
-      status: 'success',
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Subscription Endpoints
-app.get('/api/subscription/plans', (_req: Request, res: Response) => {
-  res.json({
-    plans: [
-      {
-        id: 'free',
-        name: 'Free',
-        price: 0,
-        credits: DEFAULT_SIGNUP_CREDITS,
-        features: ['1080p Export', 'Basic AI formats', 'Standard queue'],
-      },
-      {
-        id: 'pro',
-        name: 'Pro Creator',
-        price: 19,
-        credits: 1000,
-        features: ['4K Ultra HD', 'Full 3D iPhone Mockups', 'Priority queue', 'No watermark'],
-      },
-    ],
-  });
-});
+// Legacy prototype endpoints (fake 3D mockup / montage / placeholder transcription) are disabled:
+// they returned placeholder output instead of real results. Voice input uses the browser's speech recognition.
+const notAvailable = (_req: Request, res: Response) => res.status(410).json({ error: 'not_available', message: 'This feature is not available.' });
+app.post('/api/device-mockup/create', notAvailable);
+app.get('/api/montage/styles', notAvailable);
+app.post('/api/montage/create', notAvailable);
+app.get('/api/montage/:id', notAvailable);
+app.post('/api/voice/transcribe', notAvailable);
 
 // ======================= SUBSCRIPTIONS (Whop) =======================
 function publicUrl(req: Request) {
@@ -1341,9 +1376,9 @@ app.get('/api/subscription/plans', (_req: Request, res: Response) => {
 
 // Body: { user_id, tier: 'starter'|'creator', credits?: 3000|6000|9000, cycle: 'monthly'|'annually' }
 app.post('/api/subscription/checkout', async (req: Request, res: Response) => {
-  const userId = (req.body?.user_id || req.headers['x-user-id']) as string;
-  const user = userId ? getOrCreateUser(userId) : undefined;
-  if (!user) return res.status(401).json({ error: 'Not signed in' });
+  const user = requireUser(req, res);
+  if (!user) return;
+  if (!rateOk(`chk:${user.user_id}`, 30, 60 * 60_000)) return res.status(429).json({ error: 'rate_limited' });
   const plan = findPlan(String(req.body?.tier || req.body?.plan || ''), Number(req.body?.credits), String(req.body?.cycle || 'monthly'));
   if (!plan) return res.status(400).json({ error: 'unknown_plan' });
   const sessionId = `chk_${crypto.randomBytes(8).toString('hex')}`;
@@ -1361,6 +1396,8 @@ app.post('/api/subscription/checkout', async (req: Request, res: Response) => {
 app.get('/api/subscription/status/:sessionId', (req: Request, res: Response) => {
   const chk = db.whop_checkouts?.[req.params.sessionId];
   if (!chk) return res.status(404).json({ status: 'unknown' });
+  const me = sessionUser(req);
+  if (me && me.user_id !== chk.user_id) return res.status(404).json({ status: 'unknown' });
   const user = db.users[chk.user_id];
   const paid = !!user && user.subscription_status === 'active' && user.plan_key === chk.plan_key;
   const expired = !paid && Date.now() - Date.parse(chk.created_at) > 2 * DAY;
@@ -1369,9 +1406,8 @@ app.get('/api/subscription/status/:sessionId', (req: Request, res: Response) => 
 
 // Credit top-up (subscribers only). Creates a payment-provider checkout.
 app.post('/api/topup', (req: Request, res: Response) => {
-  const userId = (req.body?.user_id || req.headers['x-user-id']) as string;
-  const user = userId ? db.users[userId] : undefined;
-  if (!user) return res.status(401).json({ error: 'Not signed in' });
+  const user = requireUser(req, res);
+  if (!user) return;
   const credits = Math.floor(Number(req.body?.credits));
   if (!isFinite(credits) || credits < MIN_TOPUP || credits > MAX_TOPUP) {
     return res.status(400).json({ error: 'invalid_amount', message: `Enter between ${MIN_TOPUP} and ${MAX_TOPUP} credits.` });
@@ -1391,23 +1427,20 @@ app.post('/api/topup', (req: Request, res: Response) => {
 
 // User Management & Settings
 app.put('/api/users/:userId', (req: Request, res: Response) => {
-  const userId = req.params.userId;
-  let user = db.users[userId];
-  if (!user) {
-    user = {
-      user_id: userId,
-      id: userId,
-      username: req.body.username || 'Creator',
-      email: req.body.email || 'user@slind.ai',
-      name: req.body.name || 'Creator',
-      role: 'creator',
-      credits: DEFAULT_SIGNUP_CREDITS,
-      created_at: new Date().toISOString(),
-    };
-    db.users[userId] = user;
-  }
+  const user = requireUser(req, res);
+  if (!user) return;
+  if (req.params.userId !== user.user_id) return res.status(403).json({ error: 'forbidden' });
   // never let the client set its own balance / plan or the manual-edit flags
-  const { credits: _c, plan: _p, subscription_status: _s, role: _r, user_id: _u, id: _i, sub_credits: _sc, plan_key: _pk, plan_credits: _pc, billing_cycle: _bc, last_deposit: _ld, whop_membership_id: _wm, whop_user_id: _wu, next_credit_at: _nc, period_end: _pe, cancel_at_period_end: _cp, name_manual: _nm, picture_manual: _pm, ...safe } = req.body || {};
+  // whitelist of profile fields the client may change (never balance, plan, email or ids)
+  const body = req.body || {};
+  const safe: Record<string, any> = {};
+  for (const k of ['username', 'name', 'bio', 'language', 'picture', 'avatar']) {
+    if (typeof body[k] === 'string') safe[k] = body[k].slice(0, k === 'bio' ? 1000 : 500);
+  }
+  for (const k of ['picture', 'avatar']) {
+    // own uploads or Google profile photos only (no javascript:/data: URLs)
+    if (safe[k] && !/^(\/api\/uploads\/|\/assets\/|https:\/\/[a-z0-9.-]+\.googleusercontent\.com\/|https?:\/\/[^/]+\/api\/uploads\/)/i.test(safe[k])) delete safe[k];
+  }
   const nextName = typeof safe.name === 'string' ? safe.name.trim() : undefined;
   if (nextName) {
     safe.name = nextName;
@@ -1428,8 +1461,9 @@ app.put('/api/users/:userId', (req: Request, res: Response) => {
 
 // Current user profile incl. live credit balance (used by Account page)
 app.get('/api/users/:userId', (req: Request, res: Response) => {
-  const user = getOrCreateUser(req.params.userId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
+  const user = requireUser(req, res);
+  if (!user) return;
+  if (req.params.userId !== user.user_id) return res.status(403).json({ error: 'forbidden' });
   res.json({ user: publicUser(user, { available_credits: availableCredits(user) }) });
 });
 
@@ -1512,7 +1546,7 @@ app.post('/api/support', async (req: Request, res: Response) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
   const subject = String(req.body?.subject || 'Help & Support').trim().slice(0, 200) || 'Help & Support';
   const message = String(req.body?.message || '').trim().slice(0, 5000);
-  const userId = String(req.body?.user_id || req.headers['x-user-id'] || '').trim() || undefined;
+  const userId = sessionUser(req)?.user_id;
   const faqId = String(req.body?.faq_id || '').trim().slice(0, 80) || undefined;
   if (!email || !email.includes('@') || email.length > 200) {
     return res.status(400).json({ error: 'invalid_email', message: 'Please enter a valid email address.' });
@@ -1520,7 +1554,7 @@ app.post('/api/support', async (req: Request, res: Response) => {
   if (!message) {
     return res.status(400).json({ error: 'invalid_message', message: 'Please write a short message.' });
   }
-  if (!supportRateOk(email)) {
+  if (!supportRateOk(email) || !supportRateOk(`ip:${clientIp(req)}`)) {
     return res.status(429).json({ error: 'rate_limited', message: 'Please wait a few minutes before sending another message.' });
   }
   const entry: SupportRequest = {
@@ -1549,15 +1583,40 @@ app.post('/api/support', async (req: Request, res: Response) => {
   });
 });
 
+// Uploads / JSON parse errors -> clean JSON responses instead of HTML stack traces
+app.use((err: any, req: Request, res: Response, next: any) => {
+  if (!err) return next();
+  if (res.headersSent) return next(err);
+  if (err?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'file_too_large', message: 'Files up to 500 MB are supported.' });
+  if (String(err?.message) === 'unsupported_file_type') return res.status(415).json({ error: 'unsupported_file_type', message: 'Please upload a video, image or audio file.' });
+  if (err?.type === 'entity.too.large') return res.status(413).json({ error: 'payload_too_large' });
+  if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'invalid_json' });
+  console.error('[http] unhandled error on', req.method, req.path, err?.message || err);
+  res.status(500).json({ error: 'server_error' });
+});
+
+process.on('unhandledRejection', (e) => console.error('[process] unhandled rejection:', e));
+process.on('uncaughtException', (e) => console.error('[process] uncaught exception:', e));
+
+function startupChecks() {
+  const prod = process.env.NODE_ENV === 'production';
+  if (devAuthCodes()) console.warn('⚠️  DEV auth codes are ON (code 123456 works for any e-mail). Never run like this on the public site.');
+  if (prod && !smtpReady()) console.warn('⚠️  SMTP_* is not set: e-mail login codes cannot be delivered (only Google sign-in will work).');
+  if (prod && !process.env.PUBLIC_URL) console.warn('⚠️  PUBLIC_URL is not set (Google OAuth / Whop redirects use the Host header).');
+  if (prod && !process.env.WHOP_WEBHOOK_SECRET) console.warn('⚠️  WHOP_WEBHOOK_SECRET is not set: subscriptions will not be credited.');
+  if (prod && !process.env.GOOGLE_CLIENT_ID) console.warn('⚠️  GOOGLE_CLIENT_ID is not set: Google sign-in disabled.');
+}
+
 // ======================= FRONTEND SERVING =======================
 async function startServer() {
+  startupChecks();
   if (process.env.NODE_ENV === 'production' && fs.existsSync(path.resolve(__dirname, 'dist'))) {
     app.use(express.static(path.resolve(__dirname, 'dist')));
     app.get('*', (_req, res) => {
       res.sendFile(path.resolve(__dirname, 'dist/index.html'));
     });
     app.listen(PORT, '0.0.0.0', () => {
-      console.log(`🚀 Slind AI Full-Stack Server running on port ${PORT}`);
+      console.log(`🚀 nind ai server running on port ${PORT}`);
     });
   } else {
     // In dev mode, attach Vite HMR to HTTP server on port 3000
@@ -1584,7 +1643,7 @@ async function startServer() {
     app.use(vite.middlewares);
 
     httpServer.listen(PORT, '0.0.0.0', () => {
-      console.log(`🚀 Slind AI Full-Stack Server running on port ${PORT}`);
+      console.log(`🚀 nind ai server running on port ${PORT}`);
     });
   }
 }

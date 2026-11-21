@@ -117,7 +117,7 @@ export const AuthPopup = ({ isOpen, onClose, onSuccess }) => {
         </div>
 
         {/* Service name */}
-        <p className="auth-service-name">Slind AI</p>
+        <p className="auth-service-name">nind ai</p>
       </div>
     </div>
   );

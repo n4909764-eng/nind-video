@@ -3,6 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
+import { setSessionToken } from "../lib/session";
 import { tr } from "../utils/translations";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -131,6 +132,7 @@ const AuthPage = () => {
       });
 
       const userData = res.data?.user || res.data;
+      setSessionToken(res.data?.token || userData?.token);
       localStorage.setItem('slind_user', JSON.stringify(userData));
       toast.success(mode === 'signup' ? 'Account created successfully!' : 'Welcome back!');
       navigate('/');

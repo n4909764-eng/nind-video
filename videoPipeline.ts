@@ -251,7 +251,11 @@ function httpJson(url: string, opts: { method?: string; headers?: Record<string,
 
 export function download(url: string, out: string, maxBytes = 80 * 1024 * 1024, timeoutSec = 60): Promise<boolean> {
   return new Promise((resolve) => {
-    const p = spawn('curl', ['-sSL', '--fail', '--max-time', String(timeoutSec), '--max-filesize', String(maxBytes), '-A', UA, url, '-o', out]);
+    // stock URLs come from third-party APIs: only public http(s) hosts, never localhost / private ranges
+    let host = '';
+    try { const u = new URL(url); if (!/^https?:$/.test(u.protocol)) return resolve(false); host = u.hostname.toLowerCase(); } catch { return resolve(false); }
+    if (/^(localhost|0\.|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?$|\[?f[cd]|\[?fe80)/.test(host) || host.endsWith('.local') || host.endsWith('.internal')) return resolve(false);
+    const p = spawn('curl', ['-sSL', '--fail', '--proto', '=http,https', '--proto-redir', '=http,https', '--max-redirs', '5', '--max-time', String(timeoutSec), '--max-filesize', String(maxBytes), '-A', UA, '-o', out, '--', url]);
     p.on('close', (code) => resolve(code === 0 && fs.existsSync(out) && fs.statSync(out).size > 2048));
     p.on('error', () => resolve(false));
   });

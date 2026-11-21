@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { setSessionToken } from "../../lib/session";
 
 export const AuthCallback = () => {
   const navigate = useNavigate();
@@ -26,6 +27,7 @@ export const AuthCallback = () => {
         if (!response.ok || !data.user) {
           throw new Error(data.error || "Google sign-in failed");
         }
+        setSessionToken(data.token || data.user.token);
         localStorage.setItem("slind_user", JSON.stringify(data.user));
         navigate("/", { replace: true });
       } catch (error) {

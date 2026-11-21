@@ -1,7 +1,10 @@
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+// @ts-ignore -- plain JS module
+import { installSessionInterceptors } from './lib/session.js';
 
+installSessionInterceptors();
 createRoot(document.getElementById('root')!).render(<App />);
 
 // Prevent accidental Vite full-reloads triggered by dynamic user uploads
