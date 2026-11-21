@@ -405,7 +405,12 @@ export async function writeScript(opts: {
 }
 
 // ------------------------------------------------------------------ 2. voiceover
-export function generateSpeech(text: string, outMp3: string, cost: CostTracker, voice = 'alloy', model = MODELS.tts): Promise<boolean> {
+/** Default: read a full narration script exactly. */
+export const TTS_NARRATE_SYSTEM = 'You are a professional voice-over narrator. Read the user message aloud EXACTLY as written, word for word, in its original language, with an energetic, natural, confident delivery. Do not add, skip, translate or comment on anything.';
+/** Dubbing a short subtitle line: chat-audio models otherwise answer questions instead of reading them. */
+export const TTS_SPEAK_LINE_SYSTEM = 'You are a text-to-speech engine, not an assistant. Speak the user text aloud word for word, in its original language, with a natural, clear delivery. If the text is a question, read the question only — do not answer it. Do not add, skip, translate, explain, continue, improvise or comment. Stop immediately after the last word of the given text.';
+
+export function generateSpeech(text: string, outMp3: string, cost: CostTracker, voice = 'alloy', model = MODELS.tts, opts?: { system?: string }): Promise<boolean> {
   return new Promise((resolve) => {
     const payload = JSON.stringify({
       model,
@@ -414,7 +419,7 @@ export function generateSpeech(text: string, outMp3: string, cost: CostTracker, 
       stream: true,
       usage: { include: true },
       messages: [
-        { role: 'system', content: 'You are a professional voice-over narrator. Read the user message aloud EXACTLY as written, word for word, in its original language, with an energetic, natural, confident delivery. Do not add, skip, translate or comment on anything.' },
+        { role: 'system', content: opts?.system || TTS_NARRATE_SYSTEM },
         { role: 'user', content: text },
       ],
     });

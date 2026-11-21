@@ -344,7 +344,7 @@ async function processVideoGeneration(projectId: string, isModification = false,
       project.duration = r.state.duration;
       project.format = project.aspect === '16:9' || r.state.duration > 300 ? 'long' : 'short';
       project.edit_notes = r.notes;
-      audioFile = r.state.audio;
+      audioFile = r.state.translated?.dubAudio || r.state.audio;
     } else if (project.kind === 'source' && isModification && project.source_state) {
       const r = await applySourceEdit({ state: project.source_state, request: modificationPrompt, workDir, outVideo, outPoster, cost, onProgress: updateProgress, ru, voice: project.voice });
       project.source_state = r.state;

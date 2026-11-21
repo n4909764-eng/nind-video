@@ -8,7 +8,7 @@ import path from 'path';
 import crypto from 'crypto';
 import {
   CostTracker, Level, LevelCfg, levelCfg, normLevel, MODELS, SceneSpec, Word, OverlayItem,
-  orChat, extractJson, generateSpeech, alignWords, mediaForScene, fillMissingMedia, sceneTiming, assembleVideo,
+  orChat, extractJson, generateSpeech, TTS_SPEAK_LINE_SYSTEM, alignWords, mediaForScene, fillMissingMedia, sceneTiming, assembleVideo,
   composeFinal, buildAss, makeOverlayElement, findPhrase, findWord, renderSceneClip, mapLimit, ffmpeg, run,
   probeDuration, pyBin, HELPER, W, H, FPS, runVideoPipeline, overlayWindow, EST, reserve, release,
   withCleanOutput, stripProvenance,
@@ -415,6 +415,79 @@ async function prepareInsertMedia(plan: SourcePlan, words: Word[], workDir: stri
   plan.overlays = plan.overlays.filter((o) => o.file);
 }
 
+function dubRoom(start: number, nextStart: number | undefined, duration: number) {
+  return Math.max(0.6, (nextStart ?? duration) - start - 0.05);
+}
+
+/** ffmpeg atempo accepts 0.5–2.0; chain filters for a larger change. */
+function atempoChain(tempo: number): string {
+  const parts: string[] = [];
+  let t = tempo;
+  if (!isFinite(t) || t <= 0) return '';
+  t = Math.min(4, Math.max(0.5, t));
+  while (t > 2.0001) { parts.push('atempo=2.0'); t /= 2; }
+  while (t < 0.4999) { parts.push('atempo=0.5'); t *= 2; }
+  if (Math.abs(t - 1) >= 0.02) parts.push(`atempo=${t.toFixed(3)}`);
+  return parts.join(',');
+}
+
+function normSpeak(s: string) {
+  return String(s || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** End time of the expected line inside a whisper transcript, or null if the clip doesn't say it. */
+function expectedLineEnd(words: Word[], expected: string): number | null {
+  const etoks = normSpeak(expected).split(' ').filter(Boolean);
+  const got = words.map((w) => ({ n: normSpeak(w.w), end: w.end }));
+  if (!etoks.length || !got.length) return null;
+  let best = { hits: 0, end: -1 };
+  for (let start = 0; start < got.length; start++) {
+    let j = 0, hits = 0, end = -1;
+    for (let i = start; i < got.length && j < etoks.length; i++) {
+      const g = got[i].n, e = etoks[j];
+      if (!g) continue;
+      if (g === e || (Math.min(g.length, e.length) >= 3 && (g.startsWith(e) || e.startsWith(g)))) {
+        hits++; end = got[i].end; j++;
+      } else if (hits > 0 && g.length <= 2) continue;
+      else if (hits >= 2) continue;
+      else if (hits > 0) break;
+    }
+    if (hits > best.hits) best = { hits, end };
+    if (hits === etoks.length) break;
+  }
+  if (best.hits >= Math.max(2, Math.ceil(etoks.length * 0.7)) && best.end > 0) return best.end + 0.15;
+  return null;
+}
+
+/** Keep a dubbed line inside its time window. cutAt (seconds) drops a rambling tail when known. */
+async function fitDubClip(src: string, windowSec: number, cutAt?: number | null): Promise<string> {
+  const room = Math.max(0.45, windowSec);
+  let input = src;
+  const d0 = await probeDuration(src);
+  const cut = cutAt != null && cutAt > 0.3 && cutAt < d0 - 0.08 ? cutAt : null;
+  if (cut != null) {
+    const trimmed = src.replace(/(\.[^.]+)$/, '_trim$1');
+    const r = await ffmpeg(withCleanOutput(['-i', src, '-t', cut.toFixed(3), '-c:a', 'libmp3lame', '-b:a', '192k', trimmed], { sei: false }));
+    if (r.code === 0 && fs.existsSync(trimmed)) input = trimmed;
+  }
+  const d = await probeDuration(input);
+  const fade = Math.min(0.08, room / 6);
+  const filters: string[] = [];
+  if (d > room * 1.03) {
+    const chain = atempoChain(d / room);
+    if (chain) filters.push(chain);
+  }
+  filters.push(`atrim=0:${room.toFixed(3)}`, `afade=t=out:st=${Math.max(0, room - fade).toFixed(3)}:d=${fade.toFixed(3)}`, 'asetpts=PTS-STARTPTS');
+  const out = src.replace(/(\.[^.]+)$/, '_fit$1');
+  const r = await ffmpeg(withCleanOutput(['-i', input, '-af', filters.join(','), '-c:a', 'libmp3lame', '-b:a', '192k', out], { sei: false }));
+  if (r.code === 0 && fs.existsSync(out)) { await stripProvenance(out); return out; }
+  console.warn('[dub] fit failed', r.err.slice(-200));
+  return input;
+}
+
+const TTS_SPEAK_LINE_RETRY = (line: string) =>
+  `${TTS_SPEAK_LINE_SYSTEM} The only words you may speak are exactly these: ${line}  If that is a question, read the question and stop. Do not answer, comment, continue, improvise or have a conversation. Speak those words, then immediately end the audio.`;
+
 /** Translate transcript segments; returns pseudo-word timings for subtitles (+ optional dubbed audio). */
 async function translate(st: SourceState, lang: string, dub: boolean, workDir: string, cost: CostTracker, voice: string, cfg: LevelCfg) {
   const segs = st.segments.length ? st.segments : [{ text: st.words.map((w) => w.w).join(' '), start: st.words[0]?.start || 0, end: st.words.at(-1)?.end || st.duration, from: 0, to: st.words.length - 1 }];
@@ -432,11 +505,36 @@ async function translate(st: SourceState, lang: string, dub: boolean, workDir: s
   if (dub) {
     const parts: { file: string; start: number; len: number }[] = [];
     await mapLimit(segs.map((s, i) => ({ s, i })), 3, async ({ s, i }) => {
+      const text = String(t[i] || s.text);
       const f = path.join(workDir, `dub_${i}.mp3`);
+      const room = dubRoom(s.start, segs[i + 1]?.start, st.duration);
       const est = cfg.tts === MODELS.tts ? EST.ttsMini / 3 : EST.ttsHigh / 3;
       if (!reserve(cost, est)) return;
-      try { if (await generateSpeech(String(t[i] || s.text), f, cost, voice, cfg.tts)) parts.push({ file: f, start: s.start, len: Math.max(0.5, s.end - s.start) }); }
-      finally { release(cost, est); }
+      try {
+        if (!(await generateSpeech(text, f, cost, voice, cfg.tts, { system: TTS_SPEAK_LINE_SYSTEM }))) return;
+        let said = await transcribe(f, workDir, `dubcheck_${i}.json`);
+        let cut = expectedLineEnd(said.words, text);
+        const d = await probeDuration(f);
+        const bad = cut == null || d > Math.max(room * 2.2, (cut || 0) + 2.5);
+        if (bad && reserve(cost, est)) {
+          const f2 = path.join(workDir, `dub_${i}_retry.mp3`);
+          try {
+            if (await generateSpeech(`«${text}»`, f2, cost, voice, cfg.tts, { system: TTS_SPEAK_LINE_RETRY(text) })) {
+              const said2 = await transcribe(f2, workDir, `dubcheck_${i}_retry.json`);
+              const cut2 = expectedLineEnd(said2.words, text);
+              const d2 = await probeDuration(f2);
+              const better = (cut == null && cut2 != null) || (cut2 != null && d2 < d * 0.95) || (cut2 != null && cut == null);
+              if (better || (cut == null && cut2 == null && d2 < d * 0.85)) {
+                fs.copyFileSync(f2, f);
+                cut = cut2;
+              }
+            }
+          } finally { release(cost, est); }
+        }
+        if (cut == null) console.warn(`[dub] line ${i} may not match the script ("${text.slice(0, 80)}")`);
+        const fitted = await fitDubClip(f, room, cut);
+        parts.push({ file: fitted, start: s.start, len: room });
+      } finally { release(cost, est); }
     });
     if (parts.length) {
       parts.sort((a, b) => a.start - b.start);
@@ -444,11 +542,8 @@ async function translate(st: SourceState, lang: string, dub: boolean, workDir: s
       parts.forEach((p) => args.push('-i', p.file));
       const fc: string[] = ['[0:a]volume=0.12[bg]'];
       for (let k = 0; k < parts.length; k++) {
-        const d = await probeDuration(parts[k].file);
-        const next = parts[k + 1]?.start ?? st.duration;
-        const room = Math.max(0.6, next - parts[k].start - 0.05);
-        const tempo = Math.min(1.6, Math.max(1, d / room));
-        fc.push(`[${k + 1}:a]atempo=${tempo.toFixed(3)},adelay=${Math.round(parts[k].start * 1000)}|${Math.round(parts[k].start * 1000)}[d${k}]`);
+        const delay = Math.round(parts[k].start * 1000);
+        fc.push(`[${k + 1}:a]adelay=${delay}|${delay}[d${k}]`);
       }
       fc.push(`[bg]${parts.map((_, k) => `[d${k}]`).join('')}amix=inputs=${parts.length + 1}:duration=first:normalize=0[a]`);
       dubAudio = path.join(workDir, `dub_mix_${Date.now()}.m4a`);
