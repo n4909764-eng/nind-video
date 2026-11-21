@@ -6,7 +6,6 @@ import axios from "axios";
 import { tr } from "../utils/translations";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const FRONTEND_URL = window.location.origin;
 const API = `${BACKEND_URL}/api`;
 
 // Google icon
@@ -67,10 +66,18 @@ const AuthPage = () => {
     }
   }, [view]);
 
+  // Surface Google OAuth errors returned as /auth?error=...
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const err = params.get('error');
+    if (err) {
+      toast.error(err);
+      window.history.replaceState({}, '', '/auth');
+    }
+  }, []);
+
   const handleGoogleLogin = () => {
-    const redirectUri = `${FRONTEND_URL}/auth/callback`;
-    const authUrl = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUri)}`;
-    window.location.href = authUrl;
+    window.location.href = '/api/auth/google/start';
   };
 
   // Step 1: Send confirmation code to email
@@ -101,9 +108,7 @@ const AuthPage = () => {
       setView('otp');
     } catch (err) {
       console.error('Send code error:', err);
-      // Fallback transition for smooth dev experience
-      toast.info('Verification code: 123456');
-      setView('otp');
+      toast.error(err.response?.data?.error || 'Could not send the confirmation code. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -131,25 +136,7 @@ const AuthPage = () => {
       navigate('/');
     } catch (err) {
       console.error('Verify error:', err);
-      // If code was 123456 or server error fallback
-      if (code === '123456') {
-        const fallbackUser = {
-          user_id: `usr_${Date.now()}`,
-          id: `usr_${Date.now()}`,
-          username: email.split('@')[0] || 'Creator',
-          email: email.trim(),
-          name: email.split('@')[0] || 'Creator',
-          avatar: '/assets/profile-icon.png',
-          role: 'creator',
-          credits: 20,
-          created_at: new Date().toISOString(),
-        };
-        localStorage.setItem('slind_user', JSON.stringify(fallbackUser));
-        toast.success(mode === 'signup' ? 'Account created successfully!' : 'Welcome back!');
-        navigate('/');
-      } else {
-        toast.error(err.response?.data?.error || 'Invalid confirmation code. Try 123456');
-      }
+      toast.error(err.response?.data?.error || 'Invalid or expired confirmation code');
     } finally {
       setIsLoading(false);
     }

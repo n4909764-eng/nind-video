@@ -11,6 +11,7 @@ import dotenv from 'dotenv';
 import { runVideoPipeline, newCostTracker, CostTracker, levelCfg, normLevel, Level, ffmpeg } from './videoPipeline';
 import { applyCreatedEdit, runSourceEdit, applySourceEdit, SourceState } from './editEngine';
 import { CaptionStyle } from './captionStyle';
+import { startGoogleAuth, handleGoogleCallback, consumeGoogleTicket, authOrigin } from './googleAuth';
 
 dotenv.config();
 
@@ -83,6 +84,7 @@ interface User {
   role: string;
   credits: number;
   created_at: string;
+  authProvider?: string;
   plan?: string;
   subscription_status?: string;
   // Whop subscription state
@@ -456,12 +458,14 @@ app.post('/api/auth/send-code', (req: Request, res: Response) => {
     mode,
   };
 
-  console.log(`[AUTH] Confirmation code for ${normalized}: ${code}`);
-  res.json({
+  const devCodes = process.env.DEV_AUTH_CODES === '1' || process.env.NODE_ENV !== 'production';
+  if (devCodes) console.log(`[AUTH] Confirmation code for ${normalized}: ${code}`);
+  const payload: { success: boolean; message: string; code?: string } = {
     success: true,
     message: `Confirmation code sent to ${normalized}`,
-    code,
-  });
+  };
+  if (devCodes) payload.code = code;
+  res.json(payload);
 });
 
 app.post('/api/auth/verify-code', (req: Request, res: Response) => {
@@ -472,7 +476,8 @@ app.post('/api/auth/verify-code', (req: Request, res: Response) => {
 
   const normalized = email.toLowerCase().trim();
   const entry = authCodes[normalized];
-  const isValid = code === '123456' || (entry && entry.code === code && entry.expires_at > Date.now());
+  const devCodes = process.env.DEV_AUTH_CODES === '1' || process.env.NODE_ENV !== 'production';
+  const isValid = (devCodes && code === '123456') || (entry && entry.code === code && entry.expires_at > Date.now());
 
   if (!isValid) {
     return res.status(400).json({ error: 'Invalid or expired confirmation code' });
@@ -571,6 +576,54 @@ app.delete('/api/auth/me', (req: Request, res: Response) => {
     saveDb();
   }
   res.json({ success: true });
+});
+
+function findOrCreateGoogleUser(profile: { email: string; name: string; avatar?: string }): User {
+  const email = profile.email.toLowerCase().trim();
+  let user = Object.values(db.users).find((u) => (u.email || '').toLowerCase() === email);
+  if (user) {
+    if (profile.name && (!user.name || user.name === (user.email || '').split('@')[0])) user.name = profile.name;
+    if (profile.avatar) user.avatar = profile.avatar;
+    if (!user.authProvider) user.authProvider = 'google';
+    saveDb();
+    return user;
+  }
+  const userId = `usr_${crypto.randomBytes(6).toString('hex')}`;
+  const username = (profile.name || email.split('@')[0] || 'Creator').replace(/\s+/g, '').slice(0, 30) || 'Creator';
+  user = {
+    user_id: userId,
+    id: userId,
+    username,
+    email,
+    name: profile.name || email.split('@')[0] || 'Creator',
+    avatar: profile.avatar || '/assets/profile-icon.png',
+    role: 'creator',
+    credits: DEFAULT_SIGNUP_CREDITS,
+    created_at: new Date().toISOString(),
+    authProvider: 'google',
+  };
+  db.users[userId] = user;
+  saveDb();
+  return user;
+}
+
+app.get('/api/auth/google/start', (req: Request, res: Response) => {
+  startGoogleAuth(req, res, authOrigin(req, publicUrl(req)));
+});
+
+app.get('/api/auth/google/callback', async (req: Request, res: Response) => {
+  await handleGoogleCallback(req, res, authOrigin(req, publicUrl(req)), (profile) => {
+    const user = findOrCreateGoogleUser(profile);
+    return { user, token: `token_${user.user_id}` };
+  });
+});
+
+app.get('/api/auth/google/complete', (req: Request, res: Response) => {
+  consumeGoogleTicket(req, res);
+});
+
+app.post('/api/auth/google/complete', (req: Request, res: Response) => {
+  consumeGoogleTicket(req, res);
 });
 
 // Formats List

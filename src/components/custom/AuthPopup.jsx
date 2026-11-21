@@ -3,7 +3,6 @@ import { useNavigate } from "react-router-dom";
 import { X } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const FRONTEND_URL = window.location.origin;
 
 // Detect if device is iOS
 const isIOS = () => {
@@ -58,15 +57,12 @@ export const AuthPopup = ({ isOpen, onClose, onSuccess }) => {
   };
 
   const handleGoogleLogin = () => {
-    const redirectUri = `${FRONTEND_URL}/auth/callback`;
-    const authUrl = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUri)}`;
-    window.location.href = authUrl;
+    window.location.href = '/api/auth/google/start';
   };
 
   const handleAppleLogin = () => {
-    const redirectUri = `${FRONTEND_URL}/auth/callback`;
-    const authUrl = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUri)}`;
-    window.location.href = authUrl;
+    handleClose();
+    navigate('/auth');
   };
 
   if (!isOpen && !isClosing) return null;

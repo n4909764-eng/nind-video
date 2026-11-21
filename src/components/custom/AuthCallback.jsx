@@ -1,58 +1,36 @@
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-
 export const AuthCallback = () => {
   const navigate = useNavigate();
   const hasProcessed = useRef(false);
 
   useEffect(() => {
-    // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-    
-    // Prevent double processing in StrictMode
     if (hasProcessed.current) return;
     hasProcessed.current = true;
 
     const processAuth = async () => {
-      // Extract session_id from URL fragment
-      const hash = window.location.hash;
-      const params = new URLSearchParams(hash.replace("#", ""));
-      const sessionId = params.get("session_id");
+      const params = new URLSearchParams(window.location.search);
+      const ticket = params.get("ticket");
 
-      if (!sessionId) {
-        navigate("/", { replace: true });
+      if (!ticket) {
+        navigate("/auth?error=" + encodeURIComponent("Google sign-in did not complete. Please try again."), { replace: true });
         return;
       }
 
       try {
-        // Exchange session_id for session_token
-        const response = await fetch(`${BACKEND_URL}/api/auth/session`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
+        const response = await fetch(`/api/auth/google/complete?ticket=${encodeURIComponent(ticket)}`, {
           credentials: "include",
-          body: JSON.stringify({ session_id: sessionId }),
         });
-
-        if (!response.ok) {
-          throw new Error("Auth failed");
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.user) {
+          throw new Error(data.error || "Google sign-in failed");
         }
-
-        const userData = await response.json();
-
-        // Store user data
-        localStorage.setItem("slind_user", JSON.stringify(userData));
-
-        // Redirect to main page with user data
-        navigate("/", { 
-          replace: true,
-          state: { user: userData }
-        });
-      } catch (error) {
-        console.error("Auth callback error:", error);
+        localStorage.setItem("slind_user", JSON.stringify(data.user));
         navigate("/", { replace: true });
+      } catch (error) {
+        const message = error?.message || "Google sign-in failed. Please try again.";
+        navigate(`/auth?error=${encodeURIComponent(message)}`, { replace: true });
       }
     };
 

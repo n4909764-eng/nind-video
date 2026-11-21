@@ -1,6 +1,6 @@
 import "@/index.css";
 import "@/App.css";
-import { BrowserRouter, Routes, Route, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Toaster } from "@/components/ui/sonner";
 import MainPage from "@/pages/MainPage";
 import CreatePage from "@/pages/CreatePage";
@@ -23,12 +23,6 @@ if (typeof window !== "undefined") {
 }
 
 function AppRouter() {
-  const location = useLocation();
-
-  if (location.hash?.includes("session_id=")) {
-    return <AuthCallback />;
-  }
-
   return (
     <Routes>
       <Route path="/" element={<MainPage />} />
