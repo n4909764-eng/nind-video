@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, X, Globe, HelpCircle, LogOut, Trash2, Headph
 import { toast } from "sonner";
 import axios from "axios";
 import { translations, getTranslation, setAppLanguage } from "../../utils/translations";
+import UserAvatar from "./UserAvatar";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -346,10 +347,11 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
       const avatarUrl = `${BACKEND_URL}${uploadRes.data.url}`;
       
       await axios.put(`${API}/users/${user.user_id}`, {
-        picture: avatarUrl
+        picture: avatarUrl,
+        avatar: avatarUrl,
       });
       
-      const updatedUser = { ...user, picture: avatarUrl };
+      const updatedUser = { ...user, picture: avatarUrl, avatar: avatarUrl };
       localStorage.setItem("slind_user", JSON.stringify(updatedUser));
       if (onUpdateUser) onUpdateUser(updatedUser);
       
@@ -438,11 +440,12 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
           data-testid="profile-card"
         >
           <div className="profile-v2-avatar">
-            {user?.picture ? (
-              <img src={user.picture} alt={userName} />
-            ) : (
-              <PersonIcon className="default-avatar-icon" />
-            )}
+            <UserAvatar
+              user={user}
+              alt={userName}
+              icon={PersonIcon}
+              iconClassName="default-avatar-icon"
+            />
           </div>
           
           <div className="profile-v2-user-info">
@@ -673,11 +676,12 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
         <div className="profile-edit-avatar-section">
           <div className="profile-edit-avatar-wrapper">
             <div className="profile-edit-avatar-large">
-              {user?.picture ? (
-                <img src={user.picture} alt={userName} />
-              ) : (
-                <PersonIcon className="default-avatar-icon-large" />
-              )}
+              <UserAvatar
+                user={user}
+                alt={userName}
+                icon={PersonIcon}
+                iconClassName="default-avatar-icon-large"
+              />
             </div>
             <button 
               className="avatar-edit-btn-v2"

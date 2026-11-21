@@ -13,7 +13,7 @@ import { applyCreatedEdit, runSourceEdit, applySourceEdit, SourceState } from '.
 import { planCreation, estimateCreation, runLongVideoPipeline, decideSourceLayout } from './longForm';
 import { probeVideo } from './smartReframe';
 import { CaptionStyle } from './captionStyle';
-import { startGoogleAuth, handleGoogleCallback, consumeGoogleTicket, authOrigin } from './googleAuth';
+import { startGoogleAuth, handleGoogleCallback, consumeGoogleTicket, authOrigin, mergeGoogleProfile, GoogleProfile } from './googleAuth';
 
 dotenv.config();
 
@@ -90,6 +90,9 @@ interface User {
   email: string;
   name: string;
   avatar?: string;
+  picture?: string;
+  name_manual?: boolean;
+  picture_manual?: boolean;
   bio?: string;
   role: string;
   credits: number;
@@ -267,6 +270,19 @@ function reservedCredits(userId: string): number {
 
 function availableCredits(user: User): number {
   return Math.max(0, (user.credits || 0) - reservedCredits(user.user_id));
+}
+
+const DEFAULT_AVATAR = '/assets/profile-icon.png';
+
+/** API-facing user: always expose `picture` (alias of a real avatar URL). */
+function publicUser(user: User, extra: Record<string, unknown> = {}) {
+  const picture = user.picture || (user.avatar && user.avatar !== DEFAULT_AVATAR ? user.avatar : undefined);
+  return {
+    ...user,
+    picture: picture || undefined,
+    avatar: user.avatar || picture || DEFAULT_AVATAR,
+    ...extra,
+  };
 }
 
 function chargeProject(project: Project, cost: CostTracker) {
@@ -482,7 +498,7 @@ app.get('/api/auth/me', (req: Request, res: Response) => {
     saveDb();
   }
 
-  res.json({ user });
+  res.json({ user: publicUser(user) });
 });
 
 // Confirmation OTP codes storage
@@ -622,25 +638,25 @@ app.delete('/api/auth/me', (req: Request, res: Response) => {
   res.json({ success: true });
 });
 
-function findOrCreateGoogleUser(profile: { email: string; name: string; avatar?: string }): User {
+function findOrCreateGoogleUser(profile: GoogleProfile): User {
   const email = profile.email.toLowerCase().trim();
   let user = Object.values(db.users).find((u) => (u.email || '').toLowerCase() === email);
   if (user) {
-    if (profile.name && (!user.name || user.name === (user.email || '').split('@')[0])) user.name = profile.name;
-    if (profile.avatar) user.avatar = profile.avatar;
-    if (!user.authProvider) user.authProvider = 'google';
+    mergeGoogleProfile(user, profile);
     saveDb();
     return user;
   }
   const userId = `usr_${crypto.randomBytes(6).toString('hex')}`;
   const username = (profile.name || email.split('@')[0] || 'Creator').replace(/\s+/g, '').slice(0, 30) || 'Creator';
+  const pic = profile.picture || profile.avatar;
   user = {
     user_id: userId,
     id: userId,
     username,
     email,
     name: profile.name || email.split('@')[0] || 'Creator',
-    avatar: profile.avatar || '/assets/profile-icon.png',
+    avatar: pic || DEFAULT_AVATAR,
+    picture: pic,
     role: 'creator',
     credits: DEFAULT_SIGNUP_CREDITS,
     created_at: new Date().toISOString(),
@@ -658,7 +674,7 @@ app.get('/api/auth/google/start', (req: Request, res: Response) => {
 app.get('/api/auth/google/callback', async (req: Request, res: Response) => {
   await handleGoogleCallback(req, res, authOrigin(req, publicUrl(req)), (profile) => {
     const user = findOrCreateGoogleUser(profile);
-    return { user, token: `token_${user.user_id}` };
+    return { user: publicUser(user), token: `token_${user.user_id}` };
   });
 });
 
@@ -1390,18 +1406,31 @@ app.put('/api/users/:userId', (req: Request, res: Response) => {
     };
     db.users[userId] = user;
   }
-  // never let the client set its own balance / plan
-  const { credits: _c, plan: _p, subscription_status: _s, role: _r, user_id: _u, id: _i, sub_credits: _sc, plan_key: _pk, plan_credits: _pc, billing_cycle: _bc, last_deposit: _ld, whop_membership_id: _wm, whop_user_id: _wu, next_credit_at: _nc, period_end: _pe, cancel_at_period_end: _cp, ...safe } = req.body || {};
+  // never let the client set its own balance / plan or the manual-edit flags
+  const { credits: _c, plan: _p, subscription_status: _s, role: _r, user_id: _u, id: _i, sub_credits: _sc, plan_key: _pk, plan_credits: _pc, billing_cycle: _bc, last_deposit: _ld, whop_membership_id: _wm, whop_user_id: _wu, next_credit_at: _nc, period_end: _pe, cancel_at_period_end: _cp, name_manual: _nm, picture_manual: _pm, ...safe } = req.body || {};
+  const nextName = typeof safe.name === 'string' ? safe.name.trim() : undefined;
+  if (nextName) {
+    safe.name = nextName;
+    if (nextName !== user.name) user.name_manual = true;
+  }
+  const nextPic = typeof safe.picture === 'string' && safe.picture
+    ? safe.picture
+    : (typeof safe.avatar === 'string' && safe.avatar ? safe.avatar : undefined);
+  if (nextPic) {
+    safe.picture = nextPic;
+    safe.avatar = nextPic;
+    user.picture_manual = true;
+  }
   Object.assign(user, safe);
   saveDb();
-  res.json({ user });
+  res.json({ user: publicUser(user) });
 });
 
 // Current user profile incl. live credit balance (used by Account page)
 app.get('/api/users/:userId', (req: Request, res: Response) => {
   const user = getOrCreateUser(req.params.userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json({ user: { ...user, available_credits: availableCredits(user) } });
+  res.json({ user: publicUser(user, { available_credits: availableCredits(user) }) });
 });
 
 app.get('/api/users/check-username/:username', (req: Request, res: Response) => {

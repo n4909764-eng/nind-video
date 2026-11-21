@@ -167,7 +167,47 @@ export async function verifyGoogleIdToken(idToken: string, aud: string): Promise
   return payload;
 }
 
-export type GoogleProfile = { email: string; name: string; avatar?: string };
+export type GoogleProfile = { email: string; name: string; avatar?: string; picture?: string };
+
+function claimText(claims: Record<string, unknown>, key: string): string {
+  const v = claims[key];
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+/** Build a profile from a verified Google ID token payload. */
+export function profileFromGoogleClaims(claims: Record<string, unknown>): GoogleProfile {
+  const email = claimText(claims, 'email').toLowerCase();
+  const given = claimText(claims, 'given_name');
+  const family = claimText(claims, 'family_name');
+  const full = claimText(claims, 'name');
+  const name = full || [given, family].filter(Boolean).join(' ') || email.split('@')[0] || 'Creator';
+  const picture = claimText(claims, 'picture') || undefined;
+  return { email, name, ...(picture ? { picture, avatar: picture } : {}) };
+}
+
+export type GoogleUserFields = {
+  name?: string;
+  avatar?: string;
+  picture?: string;
+  name_manual?: boolean;
+  picture_manual?: boolean;
+  authProvider?: string;
+};
+
+/** Apply Google profile to an existing or newly created user record. */
+export function mergeGoogleProfile<T extends GoogleUserFields>(user: T, profile: GoogleProfile): T {
+  if (profile.name && !user.name_manual) {
+    user.name = profile.name;
+  }
+  const pic = profile.picture || profile.avatar;
+  if (pic && !user.picture_manual) {
+    user.picture = pic;
+    user.avatar = pic;
+  }
+  if (!user.authProvider) user.authProvider = 'google';
+  return user;
+}
+
 
 export async function handleGoogleCallback(
   req: Request,
@@ -224,9 +264,8 @@ export async function handleGoogleCallback(
       return redirectAuthError(res, 'Google sign-in failed: a verified email is required.');
     }
 
-    const name = String(claims.name || claims.given_name || email.split('@')[0] || 'Creator');
-    const avatar = typeof claims.picture === 'string' ? claims.picture : undefined;
-    const session = upsertUser({ email, name, avatar });
+    const profile = { ...profileFromGoogleClaims(claims), email };
+    const session = upsertUser(profile);
 
     sweep();
     const ticket = b64url(crypto.randomBytes(24));

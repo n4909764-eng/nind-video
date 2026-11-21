@@ -4,6 +4,7 @@ import { Plus, ArrowUp, X, Loader2, Search, ChevronRight, ChevronLeft, Check, Mo
 import { toast } from "sonner";
 import axios from "axios";
 import ProfilePage from "../components/custom/ProfilePage";
+import UserAvatar from "../components/custom/UserAvatar";
 import StyleDetailPopup from "../components/custom/StyleDetailPopup";
 import LevelPicker, { loadLevel } from "../components/custom/LevelPicker";
 import AttachmentThumb from "../components/custom/AttachmentThumb";
@@ -265,7 +266,15 @@ export const MainPage = () => {
       const srv = res.data?.user;
       if (!srv) return;
       setUser(prev => {
-        const merged = { ...(prev || local || {}), credits: srv.credits, available_credits: srv.available_credits, plan: srv.plan || (prev || local || {}).plan, subscription_status: srv.subscription_status };
+        const base = prev || local || {};
+        const merged = {
+          ...base,
+          ...srv,
+          credits: srv.credits,
+          available_credits: srv.available_credits,
+          plan: srv.plan || base.plan,
+          subscription_status: srv.subscription_status ?? base.subscription_status,
+        };
         try { localStorage.setItem("slind_user", JSON.stringify(merged)); } catch (_) { /* ignore */ }
         return merged;
       });
@@ -1569,11 +1578,12 @@ export const MainPage = () => {
               onClick={handleAvatarClick}
               data-testid="header-avatar-btn"
             >
-              {user.picture ? (
-                <img src={user.picture} alt={user.name} />
-              ) : (
-                <PersonIconAvatar className="header-avatar-icon" />
-              )}
+              <UserAvatar
+                user={user}
+                alt={user.name}
+                icon={PersonIconAvatar}
+                iconClassName="header-avatar-icon"
+              />
             </button>
           </div>
         </header>
