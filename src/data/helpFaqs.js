@@ -185,6 +185,12 @@ export const FAQ_CATEGORIES = [
           "New accounts receive **20 welcome credits**, once per person. You need at least **10 credits** to start a new video and at least **3 credits** to start an edit. A job never spends more credits than you currently have available.",
       },
       {
+        id: "how-many-videos",
+        question: "How many videos can I edit (create) with AI?",
+        answer:
+          "The number of videos depends on your available credits.\n\nOn average, 10-30 credits = 1 fully edited or created video.\nPlans include from 500 credits (up to 50 videos) to 9000 credits (up to 900 videos), and you can also purchase additional credits.",
+      },
+      {
         id: "credit-cost-varies",
         question: "Why did a video cost more or less than I expected?",
         answer:

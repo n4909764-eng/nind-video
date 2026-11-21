@@ -158,6 +158,24 @@ const UpgradePage = () => {
   const [openFaqId, setOpenFaqId] = useState(null);
   const [checkoutLoading, setCheckoutLoading] = useState(null);
 
+  useEffect(() => {
+    if (!proCreditsOpen) return;
+    const onPointer = (event) => {
+      if (!event.target.closest?.(".pricing-credits-box.has-dropdown")) {
+        setProCreditsOpen(false);
+      }
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape") setProCreditsOpen(false);
+    };
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [proCreditsOpen]);
+
   // Opens the Whop checkout for the chosen plan; the server attaches the user id as checkout metadata.
   const startCheckout = async (planKey) => {
     let user = null;
@@ -329,57 +347,56 @@ const UpgradePage = () => {
             </div>
           </div>
 
-          {/* Credits Box */}
-          <div className="pricing-credits-box">
-            <CreditsIcon className="pricing-credits-icon" color="#FFFFFF" />
-            <span className="pricing-credits-text">
-              {plan.credits} {t("credits")}
-            </span>
-
-            {plan.hasCreditsDropdown && (
-              <div className="pricing-credits-dropdown-wrapper">
+          {/* Credits Box — on Creator, the whole credits pill opens the amount menu */}
+          <div className={`pricing-credits-box${plan.hasCreditsDropdown ? " has-dropdown" : ""}`}>
+            {plan.hasCreditsDropdown ? (
+              <>
                 <button
-                  className="pricing-credits-dropdown-btn"
-                  onClick={() => setProCreditsOpen(!proCreditsOpen)}
+                  type="button"
+                  className="pricing-credits-trigger"
+                  onClick={() => setProCreditsOpen((open) => !open)}
+                  aria-expanded={proCreditsOpen}
+                  aria-haspopup="listbox"
+                  aria-label="Select credit amount"
+                  data-testid="credits-selector"
                 >
+                  <CreditsIcon className="pricing-credits-icon" color="#FFFFFF" />
+                  <span className="pricing-credits-text">
+                    {plan.credits} {t("credits")}
+                  </span>
                   <ChevronDown
-                    className={`w-4 h-4 transition-transform ${
+                    className={`w-4 h-4 pricing-credits-chevron transition-transform ${
                       proCreditsOpen ? "rotate-180" : ""
                     }`}
                   />
                 </button>
                 {proCreditsOpen && (
-                  <div className="pricing-credits-dropdown-menu">
-                    <button
-                      onClick={() => {
-                        setProCredits(3000);
-                        setProCreditsOpen(false);
-                      }}
-                    >
-                      <CreditsIcon className="pricing-credits-icon" color="#FFFFFF" />
-                      <span>3000 {t("credits")}</span>
-                    </button>
-                    <button
-                      onClick={() => {
-                        setProCredits(6000);
-                        setProCreditsOpen(false);
-                      }}
-                    >
-                      <CreditsIcon className="pricing-credits-icon" color="#FFFFFF" />
-                      <span>6000 {t("credits")}</span>
-                    </button>
-                    <button
-                      onClick={() => {
-                        setProCredits(9000);
-                        setProCreditsOpen(false);
-                      }}
-                    >
-                      <CreditsIcon className="pricing-credits-icon" color="#FFFFFF" />
-                      <span>9000 {t("credits")}</span>
-                    </button>
+                  <div className="pricing-credits-dropdown-menu" role="listbox">
+                    {[3000, 6000, 9000].map((amount) => (
+                      <button
+                        key={amount}
+                        type="button"
+                        role="option"
+                        aria-selected={proCredits === amount}
+                        onClick={() => {
+                          setProCredits(amount);
+                          setProCreditsOpen(false);
+                        }}
+                      >
+                        <CreditsIcon className="pricing-credits-icon" color="#FFFFFF" />
+                        <span>{amount} {t("credits")}</span>
+                      </button>
+                    ))}
                   </div>
                 )}
-              </div>
+              </>
+            ) : (
+              <>
+                <CreditsIcon className="pricing-credits-icon" color="#FFFFFF" />
+                <span className="pricing-credits-text">
+                  {plan.credits} {t("credits")}
+                </span>
+              </>
             )}
           </div>
 
