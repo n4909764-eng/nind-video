@@ -12,6 +12,7 @@ import path from 'path';
 import https from 'https';
 import crypto from 'crypto';
 import { spawn } from 'child_process';
+import { AsyncLocalStorage } from 'async_hooks';
 import { fileURLToPath } from 'url';
 import { CaptionStyle, styleSpec } from './captionStyle';
 
@@ -22,6 +23,16 @@ export const HELPER = path.resolve(__dirname, 'tools/media_helper.py');
 export const W = 720;
 export const H = 1280;
 export const FPS = 30;
+
+/** Output frame. Short-form = vertical 720x1280 (default), long-form = horizontal 1920x1080.
+ *  The active frame travels with the job via AsyncLocalStorage, so concurrent jobs never mix sizes. */
+export interface Frame { w: number; h: number; aspect: '9:16' | '16:9'; orientation: 'portrait' | 'landscape' }
+export const FRAME_PORTRAIT: Frame = { w: W, h: H, aspect: '9:16', orientation: 'portrait' };
+export const FRAME_LANDSCAPE: Frame = { w: 1920, h: 1080, aspect: '16:9', orientation: 'landscape' };
+export const frameFor = (aspect?: string | null): Frame => (aspect === '16:9' ? FRAME_LANDSCAPE : FRAME_PORTRAIT);
+const frameCtx = new AsyncLocalStorage<Frame>();
+export const curFrame = (): Frame => frameCtx.getStore() || FRAME_PORTRAIT;
+export function withFrame<T>(f: Frame, fn: () => Promise<T>): Promise<T> { return frameCtx.run(f, fn); }
 
 export type Level = 'low' | 'default' | 'high';
 export const normLevel = (l?: any): Level => (l === 'low' || l === 'high' ? l : 'default');
@@ -381,14 +392,16 @@ async function pexels(query: string, kind: 'video' | 'photo', hd = false): Promi
   if (!key) return [];
   try {
     if (kind === 'video') {
-      const j = await httpJson(`https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=5`, { headers: { Authorization: key }, timeoutMs: 15000 });
+      const fr = curFrame();
+      const tgt = fr.orientation === 'landscape' ? (hd ? 1080 : 720) : (hd ? 1920 : 1280);
+      const j = await httpJson(`https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=${fr.orientation}&per_page=5`, { headers: { Authorization: key }, timeoutMs: 15000 });
       return (j.videos || []).map((v: any) => {
         const files = (v.video_files || []).filter((f: any) => f.file_type === 'video/mp4' && f.width && f.height)
-          .sort((a: any, b: any) => Math.abs(a.height - (hd ? 1920 : 1280)) - Math.abs(b.height - (hd ? 1920 : 1280)));
+          .sort((a: any, b: any) => Math.abs(a.height - tgt) - Math.abs(b.height - tgt));
         return files[0] ? { source: 'pexels', kind, thumb: v.image, url: files[0].link, page_url: v.url, w: files[0].width, h: files[0].height } : null;
       }).filter(Boolean);
     }
-    const j = await httpJson(`https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=5`, { headers: { Authorization: key }, timeoutMs: 15000 });
+    const j = await httpJson(`https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&orientation=${curFrame().orientation}&per_page=5`, { headers: { Authorization: key }, timeoutMs: 15000 });
     return (j.photos || []).map((p: any) => ({ source: 'pexels', kind, thumb: p.src?.medium, url: p.src?.large2x || p.src?.original, page_url: p.url, w: p.width, h: p.height }));
   } catch (e) { console.warn('[pexels]', (e as Error).message); return []; }
 }
@@ -404,7 +417,7 @@ async function pixabay(query: string, kind: 'video' | 'photo', hd = false): Prom
         return v?.url ? { source: 'pixabay', kind, thumb: v.thumbnail || h.videos?.tiny?.thumbnail, url: v.url, page_url: h.pageURL, w: v.width, h: v.height } : null;
       }).filter((c: any) => c && c.thumb);
     }
-    const j = await httpJson(`https://pixabay.com/api/?key=${key}&q=${encodeURIComponent(query)}&image_type=photo&per_page=5&safesearch=true`, { timeoutMs: 15000 });
+    const j = await httpJson(`https://pixabay.com/api/?key=${key}&q=${encodeURIComponent(query)}&image_type=photo&per_page=5&safesearch=true${curFrame().orientation === 'landscape' ? '&orientation=horizontal' : ''}`, { timeoutMs: 15000 });
     return (j.hits || []).map((h: any) => ({ source: 'pixabay', kind, thumb: h.webformatURL, url: h.largeImageURL, page_url: h.pageURL, w: h.imageWidth, h: h.imageHeight }));
   } catch (e) { console.warn('[pixabay]', (e as Error).message); return []; }
 }
@@ -690,7 +703,7 @@ async function imageFromResponse(res: any, out: string): Promise<boolean> {
   return fs.statSync(out).size > 1024;
 }
 
-export async function generateRealPhoto(prompt: string, out: string, cost: CostTracker, label: string, model = MODELS.image, aspect = '9:16'): Promise<boolean> {
+export async function generateRealPhoto(prompt: string, out: string, cost: CostTracker, label: string, model = MODELS.image, aspect: string = curFrame().aspect): Promise<boolean> {
   const est = model === MODELS.image ? EST.image : EST.imageCheap;
   if (!reserve(cost, est)) { console.warn(`[image] skipped "${label}": credit budget reached`); return false; }
   try {
@@ -735,35 +748,50 @@ export async function makeOverlayElement(element: string, workDir: string, cost:
 }
 
 // ------------------------------------------------------------------ 7. rendering
+/** Working canvas for photo motion (2x of the 720x1280 frame; 1.5x of 1920x1080). */
+function bigCanvas(f: Frame = curFrame()) { return f.orientation === 'landscape' ? { bw: 2880, bh: 1620 } : { bw: 1440, bh: 2560 }; }
+
 function motionFilter(i: number, frames: number) {
   const t = i % 5;
-  if (t === 0) return `zoompan=z='1+0.18*on/${frames}':d=${frames}:s=1440x2560:fps=${FPS}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`;
-  if (t === 1) return `zoompan=z='1.18-0.18*on/${frames}':d=${frames}:s=1440x2560:fps=${FPS}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`;
-  if (t === 2) return `zoompan=z='1.15':d=${frames}:s=1440x2560:fps=${FPS}:x='(iw-iw/zoom)*on/${frames}':y='ih/2-(ih/zoom/2)'`;
-  if (t === 3) return `zoompan=z='1.15':d=${frames}:s=1440x2560:fps=${FPS}:x='(iw-iw/zoom)*(1-on/${frames})':y='ih/2-(ih/zoom/2)'`;
-  return `zoompan=z='1.05+0.12*on/${frames}':d=${frames}:s=1440x2560:fps=${FPS}:x='(iw-iw/zoom)*on/${frames}':y='(ih-ih/zoom)*on/${frames}'`;
+  const { bw, bh } = bigCanvas();
+  const s = `${bw}x${bh}`;
+  if (t === 0) return `zoompan=z='1+0.18*on/${frames}':d=${frames}:s=${s}:fps=${FPS}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`;
+  if (t === 1) return `zoompan=z='1.18-0.18*on/${frames}':d=${frames}:s=${s}:fps=${FPS}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`;
+  if (t === 2) return `zoompan=z='1.15':d=${frames}:s=${s}:fps=${FPS}:x='(iw-iw/zoom)*on/${frames}':y='ih/2-(ih/zoom/2)'`;
+  if (t === 3) return `zoompan=z='1.15':d=${frames}:s=${s}:fps=${FPS}:x='(iw-iw/zoom)*(1-on/${frames})':y='ih/2-(ih/zoom/2)'`;
+  return `zoompan=z='1.05+0.12*on/${frames}':d=${frames}:s=${s}:fps=${FPS}:x='(iw-iw/zoom)*on/${frames}':y='(ih-ih/zoom)*on/${frames}'`;
 }
 
 export async function renderSceneClip(media: NonNullable<SceneSpec['media']>, i: number, frames: number, out: string): Promise<boolean> {
+  const fr = curFrame();
+  const { w: W, h: H } = fr;
+  const { bw, bh } = bigCanvas(fr);
   const enc = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p', '-r', String(FPS), '-an', '-frames:v', String(frames)];
+  const dims = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', media.file]);
+  const [iw, ih] = dims.out.trim().split(',').map(Number);
+  // horizontal frame + vertical/square media: blurred fill + the whole media in the middle (never a thin centre slice)
+  const narrowInWide = fr.orientation === 'landscape' && iw > 0 && ih > 0 && iw / ih < 1.2;
   if (media.kind === 'video') {
     const dur = frames / FPS;
     const srcDur = await probeDuration(media.file);
     const ss = srcDur > dur + 2 ? Math.min(1.5, srcDur - dur - 0.2) : 0;
+    const vf = narrowInWide
+      ? `split[a][b];[a]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=30:2,eq=brightness=-0.1[bg];[b]scale=-2:${H}[fg];[bg][fg]overlay=(W-w)/2:0,setsar=1,fps=${FPS}`
+      : `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,fps=${FPS},eq=saturation=1.03`;
     const r = await ffmpeg(['-stream_loop', '-1', '-ss', ss.toFixed(2), '-i', media.file, '-t', (dur + 0.5).toFixed(2),
-      '-vf', `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,fps=${FPS},eq=saturation=1.03`, ...enc, out]);
+      '-vf', vf, ...enc, out]);
     if (r.code === 0) return true;
     console.warn('[clip video]', r.err.slice(-300));
     return false;
   }
-  // landscape real photos: slow horizontal pan across the frame instead of a hard centre crop
-  const dims = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', media.file]);
-  const [iw, ih] = dims.out.trim().split(',').map(Number);
-  const landscape = iw > 0 && ih > 0 && iw / ih > 1.05;
-  const vf = landscape
-    ? `scale=-2:2560,setsar=1,crop=1440:2560:x='(iw-ow)*(${i % 2 === 0 ? `0.2+0.6*n/${frames}` : `0.8-0.6*n/${frames}`})':y=0,scale=${W}:${H}:flags=lanczos`
-    : `scale=1440:2560:force_original_aspect_ratio=increase,crop=1440:2560,setsar=1,${motionFilter(i, frames)},scale=${W}:${H}:flags=lanczos`;
-  const r = await ffmpeg([...(landscape ? ['-loop', '1', '-framerate', String(FPS)] : []), '-i', media.file, '-vf', vf, ...enc, out]);
+  // photos much wider than the frame: slow horizontal pan across it instead of a hard centre crop
+  const landscape = iw > 0 && ih > 0 && iw / ih > (fr.orientation === 'landscape' ? 2.4 : 1.05);
+  const vf = narrowInWide
+    ? `split[a][b];[a]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=30:2,eq=brightness=-0.1[bg];[b]scale=-2:${H}:flags=lanczos[fg];[bg][fg]overlay=(W-w)/2:0,setsar=1,scale=${bw}:${bh},${motionFilter(i, frames)},scale=${W}:${H}:flags=lanczos`
+    : landscape
+      ? `scale=-2:${bh},setsar=1,crop=${bw}:${bh}:x='(iw-ow)*(${i % 2 === 0 ? `0.2+0.6*n/${frames}` : `0.8-0.6*n/${frames}`})':y=0,scale=${W}:${H}:flags=lanczos`
+      : `scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},setsar=1,${motionFilter(i, frames)},scale=${W}:${H}:flags=lanczos`;
+  const r = await ffmpeg([...(landscape && !narrowInWide ? ['-loop', '1', '-framerate', String(FPS)] : []), '-i', media.file, '-vf', vf, ...enc, out]);
   if (r.code !== 0) console.warn('[clip photo]', r.err.slice(-300));
   return r.code === 0;
 }
@@ -801,6 +829,7 @@ export interface PipelineInput {
   level?: Level;
   style?: CaptionStyle;
   attachedImages?: string[]; // absolute paths to user images, used as scene photos in order
+  aspect?: '9:16' | '16:9'; // output frame (default vertical short-form)
   previous?: { scenes: SceneSpec[]; full_script: string; words?: Word[] };
   onProgress: (pct: number, msg: string) => void;
   cost: CostTracker;
@@ -888,14 +917,18 @@ export async function fillMissingMedia(scenes: SceneSpec[], workDir: string) {
       const j = have.reduce((b, x) => (Math.abs(x - i) < Math.abs(b - i) ? x : b), have[0]);
       scenes[i].media = { ...scenes[j].media!, source: `${scenes[j].media!.source}:reused` };
     } else {
-      const f = path.join(workDir, `scene_${i}_gradient.png`);
-      await ffmpeg(['-f', 'lavfi', '-i', `gradients=s=${W}x${H}:c0=0x0b1a3a:c1=0x0f7dfe:c2=0x05060a:n=3:speed=0.01`, '-frames:v', '1', f]);
+      const f = path.join(workDir, `scene_${i}_gradient_${curFrame().w}.png`);
+      await ffmpeg(['-f', 'lavfi', '-i', `gradients=s=${curFrame().w}x${curFrame().h}:c0=0x0b1a3a:c1=0x0f7dfe:c2=0x05060a:n=3:speed=0.01`, '-frames:v', '1', f]);
       scenes[i].media = { kind: 'photo', source: 'gradient', file: f };
     }
   }
 }
 
-export async function runVideoPipeline(inp: PipelineInput): Promise<PipelineResult> {
+export function runVideoPipeline(inp: PipelineInput): Promise<PipelineResult> {
+  return withFrame(frameFor(inp.aspect), () => runVideoPipelineInFrame(inp));
+}
+
+async function runVideoPipelineInFrame(inp: PipelineInput): Promise<PipelineResult> {
   const { workDir, cost } = inp;
   fs.mkdirSync(workDir, { recursive: true });
   const ru = String(inp.language).toLowerCase().startsWith('ru');
@@ -968,7 +1001,7 @@ export async function sceneClip(media: NonNullable<SceneSpec['media']>, i: numbe
   fs.mkdirSync(dir, { recursive: true });
   let mt = 0;
   try { mt = fs.statSync(media.file).mtimeMs; } catch { return null; }
-  const key = crypto.createHash('md5').update(`${media.file}|${mt}|${frames}|${i % 5}|${W}x${H}`).digest('hex').slice(0, 16);
+  const key = crypto.createHash('md5').update(`${media.file}|${mt}|${frames}|${i % 5}|${curFrame().w}x${curFrame().h}`).digest('hex').slice(0, 16);
   const out = path.join(dir, `${key}.mp4`);
   if (fs.existsSync(out) && fs.statSync(out).size > 1000) return out;
   const ok = await renderSceneClip(media, i, frames, out);
@@ -1005,8 +1038,13 @@ export function overlayWindow(words: Word[], wi: number, duration: number, headl
 export async function buildAss(workDir: string, words: Word[], duration: number, headlines: any[], style?: CaptionStyle): Promise<string> {
   const spec = path.join(workDir, `subs_spec_${Date.now()}.json`);
   const ass = path.join(workDir, `subs_${Date.now()}.ass`);
-  fs.writeFileSync(spec, JSON.stringify({ width: W, height: H, duration, words, headlines, style: styleSpec(style || {}) }));
-  const ar = await run(pyBin(), [HELPER, 'ass', spec, ass], { timeoutMs: 120000 });
+  const fr = curFrame();
+  // horizontal: smaller subtitles in the lower safe area, longer lines; headlines a bit above centre
+  const layout = fr.orientation === 'landscape'
+    ? { sub_font_size: 58, headline_font_size: 96, sub_y_frac: 0.84, head_y_frac: 0.42, sub_max_words: 6, side_margin: 240 }
+    : {};
+  fs.writeFileSync(spec, JSON.stringify({ width: fr.w, height: fr.h, duration, words, headlines, style: styleSpec(style || {}), ...layout }));
+  const ar = await run(pyBin(), [HELPER, 'ass', spec, ass], { timeoutMs: Math.max(120000, duration * 200) });
   if (ar.code !== 0) throw new Error('subtitle build failed: ' + ar.err.slice(-300));
   return ass;
 }
@@ -1032,8 +1070,10 @@ export async function assembleVideo(a: AssembleInput): Promise<void> {
   overlays.push(...(a.extraOverlays || []));
   // 5. render scene clips (cached: unchanged scenes are not re-encoded on edits)
   a.onProgress(74, say('Editing the video...', 'Монтируем видео...'));
-  const clips: string[] = [];
-  for (let i = 0; i < scenes.length; i++) {
+  const clips: string[] = new Array(scenes.length);
+  let rendered = 0;
+  // long videos have hundreds of scenes: render a few clips in parallel (short ones stay sequential as before)
+  await mapLimit(scenes.map((_, i) => i), scenes.length > 12 ? 3 : 1, async (i) => {
     let out = await sceneClip(scenes[i].media!, i, sceneFrames[i], workDir);
     if (!out) {
       // broken media -> borrow another scene's visual instead of failing / showing grey
@@ -1041,9 +1081,10 @@ export async function assembleVideo(a: AssembleInput): Promise<void> {
       if (alt) { scenes[i].media = { ...alt.media!, source: alt.media!.source + ':reused' }; out = await sceneClip(scenes[i].media!, i, sceneFrames[i], workDir); }
     }
     if (!out) throw new Error(`Failed to render scene ${i + 1}`);
-    clips.push(out);
-    a.onProgress(74 + Math.round(((i + 1) / scenes.length) * 12), say(`Editing ${i + 1}/${scenes.length}`, `Монтаж ${i + 1}/${scenes.length}`));
-  }
+    clips[i] = out;
+    rendered++;
+    a.onProgress(74 + Math.round((rendered / scenes.length) * 12), say(`Editing ${rendered}/${scenes.length}`, `Монтаж ${rendered}/${scenes.length}`));
+  });
   const list = path.join(workDir, 'concat.txt');
   fs.writeFileSync(list, clips.map((c) => `file '${c}'`).join('\n'));
   const merged = path.join(workDir, 'merged.mp4');
@@ -1058,6 +1099,9 @@ export async function assembleVideo(a: AssembleInput): Promise<void> {
 /** Final composition: overlays (eased rise / fullscreen inserts) + subtitles + audio. */
 export async function composeFinal(c: { baseVideo: string; overlays: OverlayItem[]; assFile: string; audioFile: string; duration: number; outVideo: string; outPoster: string }) {
   const { overlays, duration } = c;
+  const fr = curFrame();
+  const { w: W, h: H } = fr;
+  const wide = fr.orientation === 'landscape';
   const args: string[] = ['-i', c.baseVideo];
   overlays.forEach((o) => {
     if (o.mode === 'fullscreen' && /\.(mp4|webm|mov)$/i.test(o.file)) args.push('-i', o.file);
@@ -1078,13 +1122,15 @@ export async function composeFinal(c: { baseVideo: string; overlays: OverlayItem
         `${isVid ? `setpts=PTS-STARTPTS+${A}/TB,` : ''}fade=t=in:st=${A}:d=0.2:alpha=1,fade=t=out:st=${(o.end - 0.2).toFixed(3)}:d=0.2:alpha=1[ov${k}]`);
       fc.push(`${last}[ov${k}]overlay=0:0:enable='between(t,${A},${B})':eof_action=pass[v${k}]`);
     } else {
-      const maxW = o.mode === 'card' ? 540 : 330;
+      const maxW = wide ? (o.mode === 'card' ? 470 : 300) : (o.mode === 'card' ? 540 : 330);
       fc.push(`[${k + 1}:v]scale=w='min(${maxW},iw)':h=-1,format=rgba[ov${k}]`);
       const pin = `clip((t-${A})/${RISE},0,1)`;
       const pout = `clip((t-(${B}-${RISE}))/${RISE},0,1)`;
-      const target = o.mode === 'card' ? `(H*0.40-h/2)` : `(H*0.47-h/2)`;
+      const target = wide ? `(H*0.43-h/2)` : o.mode === 'card' ? `(H*0.40-h/2)` : `(H*0.47-h/2)`;
       const y = `${target}+(H-${target})*(pow(1-${pin},3)+pow(${pout},3))`;
-      fc.push(`${last}[ov${k}]overlay=x='(W-w)/2':y='${y}':enable='between(t,${A},${B})':eval=frame[v${k}]`);
+      // horizontal: popups sit in the right third so the speaker/subject stays visible
+      const x = wide ? `(W*0.76-w/2)` : `(W-w)/2`;
+      fc.push(`${last}[ov${k}]overlay=x='${x}':y='${y}':enable='between(t,${A},${B})':eval=frame[v${k}]`);
     }
     last = `[v${k}]`;
   });
@@ -1093,7 +1139,7 @@ export async function composeFinal(c: { baseVideo: string; overlays: OverlayItem
   args.push('-filter_complex', fc.join(';'), '-map', '[vout]', '-map', `${audioIdx}:a`,
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', String(FPS),
     '-c:a', 'aac', '-b:a', '192k', '-t', duration.toFixed(3), '-movflags', '+faststart', c.outVideo);
-  const fr = await ffmpeg(args, 20 * 60 * 1000);
-  if (fr.code !== 0 || !fs.existsSync(c.outVideo)) throw new Error('final render failed: ' + fr.err.slice(-400));
+  const rr = await ffmpeg(args, Math.max(20 * 60 * 1000, duration * 2500));
+  if (rr.code !== 0 || !fs.existsSync(c.outVideo)) throw new Error('final render failed: ' + rr.err.slice(-400));
   await ffmpeg(['-ss', Math.min(1, duration / 2).toFixed(2), '-i', c.outVideo, '-frames:v', '1', '-q:v', '3', c.outPoster]);
 }

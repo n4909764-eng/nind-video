@@ -11,8 +11,10 @@ import {
   orChat, extractJson, generateSpeech, alignWords, mediaForScene, fillMissingMedia, sceneTiming, assembleVideo,
   composeFinal, buildAss, makeOverlayElement, findPhrase, findWord, renderSceneClip, mapLimit, ffmpeg, run,
   probeDuration, pyBin, HELPER, W, H, FPS, runVideoPipeline, overlayWindow, EST, reserve, release,
-  deriveSearchQuery,
+  deriveSearchQuery, withFrame, frameFor, curFrame,
 } from './videoPipeline';
+import { probeVideo, smartReframe, ReframeResult } from './smartReframe';
+import { decideSourceLayout, selectHighlights, remapToCut, SourceLayout } from './longForm';
 import { CaptionStyle, DEFAULT_STYLE, FONTS, fontKey, normColor } from './captionStyle';
 
 type Progress = (pct: number, msg: string) => void;
@@ -82,6 +84,7 @@ async function insertMedia(spec: { media_type?: string; search_query?: string; v
 // ================================================================== 1. edits of created videos
 export interface CreatedProject {
   scenes: SceneSpec[]; words: Word[]; full_script: string; style?: CaptionStyle; level?: Level; voice?: string; language?: string; format_id?: string; prompt?: string;
+  aspect?: '9:16' | '16:9';
 }
 
 const CREATE_EDIT_SYSTEM = `You convert a user's edit request for an existing short video into a MINIMAL list of JSON operations.
@@ -111,10 +114,17 @@ export async function planCreatedEdit(p: CreatedProject, request: string, attach
   return { ops: Array.isArray(j.ops) ? j.ops : [], summary: String(j.summary || '') };
 }
 
-export async function applyCreatedEdit(o: {
+type CreatedEditInput = {
   project: CreatedProject; request: string; attachments: string[]; workDir: string; outVideo: string; outPoster: string;
   cost: CostTracker; onProgress: Progress; ru: boolean;
-}) {
+};
+
+/** Edits re-render in the project's own frame (vertical short or horizontal long). */
+export function applyCreatedEdit(o: CreatedEditInput) {
+  return withFrame(frameFor(o.project.aspect), () => applyCreatedEditInFrame(o));
+}
+
+async function applyCreatedEditInFrame(o: CreatedEditInput) {
   const { project: p, workDir, cost } = o;
   const say = (en: string, r: string) => (o.ru ? r : en);
   o.onProgress(10, say('Understanding your edit...', 'Разбираем правку...'));
@@ -125,6 +135,7 @@ export async function applyCreatedEdit(o: {
     const r = await runVideoPipeline({
       projectId: 'edit', prompt: o.request, language: p.language || 'auto', format: p.format_id || 'auto', workDir, outVideo: o.outVideo, outPoster: o.outPoster,
       voice: p.voice, level: p.level, style: p.style, previous: { scenes: p.scenes, full_script: p.full_script, words: p.words }, onProgress: o.onProgress, cost,
+      aspect: p.aspect,
     });
     return { scenes: r.scenes, words: r.words, full_script: r.full_script, style: p.style, audioFile: r.audioFile, duration: r.duration, ops, summary, notes: [] as string[] };
   }
@@ -240,35 +251,67 @@ export interface SourcePlan {
 export interface SourceState {
   base: string; audio: string; duration: number; words: Word[]; segments: { text: string; start: number; end: number; from: number; to: number }[];
   language?: string; plan: SourcePlan; style: CaptionStyle; level: Level;
+  aspect?: '9:16' | '16:9'; layout?: SourceLayout; reframe?: ReframeResult | null;
   translated?: { lang: string; words: Word[]; dubAudio?: string } | null;
 }
 
-async function normaliseSource(src: string, workDir: string) {
-  const base = path.join(workDir, 'src_base.mp4');
-  const audio = path.join(workDir, 'src_audio.m4a');
-  if (!fs.existsSync(base)) {
-    const dims = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', src]);
-    const [iw, ih] = dims.out.trim().split(',').map(Number);
-    if (!(iw > 0 && ih > 0)) throw new Error('The uploaded file has no readable video track.');
-    const ratio = iw / ih;
-    const vf = Math.abs(ratio - W / H) < 0.12
-      ? `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,fps=${FPS}`
-      : `split[a][b];[a]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=24:2,eq=brightness=-0.08[bg];[b]scale=${W}:-2[fg];[bg][fg]overlay=0:(H-h)/2,setsar=1,fps=${FPS}`;
-    const r = await ffmpeg(['-i', src, '-t', '180', '-filter_complex', `[0:v]${vf}[v]`, '-map', '[v]', '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p', base]);
-    if (r.code !== 0) throw new Error('Could not read the uploaded video: ' + r.err.slice(-200));
-  }
-  if (!fs.existsSync(audio)) {
-    const has = await run('ffprobe', ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', src]);
-    if (has.out.trim()) await ffmpeg(['-i', src, '-t', '180', '-vn', '-c:a', 'aac', '-b:a', '192k', audio]);
-    if (!fs.existsSync(audio)) await ffmpeg(['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-t', String(await probeDuration(base)), '-c:a', 'aac', audio]);
-  }
-  return { base, audio, duration: await probeDuration(base) };
+async function hasAudioStream(src: string) {
+  const has = await run('ffprobe', ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', src]);
+  return !!has.out.trim();
 }
 
-async function transcribe(media: string, workDir: string) {
-  const out = path.join(workDir, 'transcript.json');
+/**
+ * Fit the upload into the job's frame (curFrame): same shape -> cover; horizontal source + vertical frame
+ * -> Smart Reframe (follows the subject); anything else -> whole picture on a blurred fill.
+ */
+async function normaliseSource(src: string, workDir: string, opts: { reframe?: boolean; maxSeconds?: number } = {}) {
+  const base = path.join(workDir, 'src_base.mp4');
+  const audio = path.join(workDir, 'src_audio.m4a');
+  const { w: W, h: H } = curFrame();
+  const maxS = String(Math.ceil(opts.maxSeconds || 300));
+  let reframe: ReframeResult | null = null;
+  if (!fs.existsSync(base)) {
+    const pr = await probeVideo(src); // rotation-aware (iPhone .mov stores landscape clips rotated)
+    const iw = pr.w, ih = pr.h;
+    if (!(iw > 0 && ih > 0)) throw new Error('The uploaded file has no readable video track.');
+    if (opts.reframe) {
+      reframe = await smartReframe(src, base, workDir, { w: W, h: H }, Number(maxS), ['-r', String(FPS)]);
+      if (!reframe.ok) console.warn('[reframe] fallback to fit:', reframe.method);
+    }
+    if (!reframe?.ok) {
+      const ratio = iw / ih;
+      const vf = Math.abs(ratio - W / H) < 0.12
+        ? `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,fps=${FPS}`
+        : `split[a][b];[a]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=24:2,eq=brightness=-0.08[bg];[b]scale=${W}:${H}:force_original_aspect_ratio=decrease:force_divisible_by=2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=${FPS}`;
+      const r = await ffmpeg(['-i', src, '-t', maxS, '-filter_complex', `[0:v]${vf}[v]`, '-map', '[v]', '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-pix_fmt', 'yuv420p', base], Math.max(10 * 60 * 1000, Number(maxS) * 2000));
+      if (r.code !== 0) throw new Error('Could not read the uploaded video: ' + r.err.slice(-200));
+    }
+  }
+  if (!fs.existsSync(audio)) {
+    if (await hasAudioStream(src)) await ffmpeg(['-i', src, '-t', maxS, '-vn', '-c:a', 'aac', '-b:a', '192k', audio]);
+    if (!fs.existsSync(audio)) await ffmpeg(['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-t', String(await probeDuration(base)), '-c:a', 'aac', audio]);
+  }
+  return { base, audio, duration: await probeDuration(base), reframe };
+}
+
+/** Keep only the given time ranges of the upload (video + audio), in order. */
+async function cutSource(src: string, keep: { start: number; end: number }[], workDir: string): Promise<string> {
+  const out = path.join(workDir, 'src_cut.mp4');
+  const sel = keep.map((r) => `between(t,${r.start.toFixed(3)},${r.end.toFixed(3)})`).join('+');
+  const audio = await hasAudioStream(src);
+  const fc = [`[0:v]setpts=PTS-STARTPTS,fps=${FPS},select='${sel}',setpts=N/${FPS}/TB[v]`];
+  if (audio) fc.push(`[0:a]asetpts=PTS-STARTPTS,aselect='${sel}',asetpts=N/SR/TB[a]`);
+  const total = keep.reduce((n, r) => n + r.end - r.start, 0);
+  const r = await ffmpeg(['-i', src, '-filter_complex', fc.join(';'), '-map', '[v]', ...(audio ? ['-map', '[a]', '-c:a', 'aac', '-b:a', '192k'] : []),
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '17', '-pix_fmt', 'yuv420p', out], Math.max(10 * 60 * 1000, total * 4000));
+  if (r.code !== 0 || !fs.existsSync(out)) throw new Error('Could not cut the video: ' + r.err.slice(-200));
+  return out;
+}
+
+async function transcribe(media: string, workDir: string, name = 'transcript.json') {
+  const out = path.join(workDir, name);
   if (!fs.existsSync(out)) {
-    const r = await run(pyBin(), [HELPER, 'transcribe', media, out], { timeoutMs: 15 * 60 * 1000 });
+    const r = await run(pyBin(), [HELPER, 'transcribe', media, out], { timeoutMs: 60 * 60 * 1000 });
     if (r.code !== 0) { console.warn('[transcribe]', r.err.slice(-300)); return { words: [] as Word[], segments: [] as any[], language: undefined }; }
   }
   const j = JSON.parse(fs.readFileSync(out, 'utf8'));
@@ -513,26 +556,70 @@ export function ensureHighEditStockInserts(plan: SourcePlan, words: Word[], dura
   }
 }
 
-export async function runSourceEdit(o: {
+type SourceEditInput = {
   sourceFile: string; prompt: string; level?: Level; style?: CaptionStyle; voice?: string; workDir: string; outVideo: string; outPoster: string;
   cost: CostTracker; onProgress: Progress; ru: boolean;
-}): Promise<{ state: SourceState; notes: string[]; title: string }> {
+};
+
+/**
+ * Output frame for an upload (the user's words always win):
+ *  short horizontal -> vertical 9:16 with Smart Reframe; long horizontal -> horizontal 16:9;
+ *  vertical (any length) -> vertical; "shorten / highlights / N seconds" -> cut to the best moments first.
+ */
+export async function runSourceEdit(o: SourceEditInput): Promise<{ state: SourceState; notes: string[]; title: string }> {
+  const pr = await probeVideo(o.sourceFile);
+  if (!(pr.w > 0 && pr.h > 0)) throw new Error('The uploaded file has no readable video track.');
+  const layout = decideSourceLayout(pr, o.prompt);
+  console.log(`[edit source] ${pr.w}x${pr.h} ${pr.duration.toFixed(1)}s -> ${layout.aspect}${layout.reframe ? ' +reframe' : ''}${layout.cutTo ? ` cut ${layout.cutTo}s` : ''} (${layout.reason})`);
+  return withFrame(frameFor(layout.aspect), () => runSourceEditInFrame(o, layout));
+}
+
+async function runSourceEditInFrame(o: SourceEditInput, layout: SourceLayout): Promise<{ state: SourceState; notes: string[]; title: string }> {
   const { workDir, cost } = o;
   fs.mkdirSync(workDir, { recursive: true });
   const say = (en: string, r: string) => (o.ru ? r : en);
   const cfg = levelCfg(normLevel(o.level));
+  const notes: string[] = [];
   o.onProgress(8, say('Preparing your video...', 'Готовим ваше видео...'));
-  const { base, audio, duration } = await normaliseSource(o.sourceFile, workDir);
-  o.onProgress(18, say('Transcribing speech...', 'Распознаём речь...'));
+  let srcFile = o.sourceFile;
+  if (layout.cutTo) {
+    // transcript of the whole upload first, then keep only the best moments
+    const fullAudio = path.join(workDir, 'src_audio_full.m4a');
+    if (!fs.existsSync(fullAudio) && await hasAudioStream(o.sourceFile)) await ffmpeg(['-i', o.sourceFile, '-t', String(Math.ceil(layout.maxSeconds)), '-vn', '-c:a', 'aac', '-b:a', '192k', fullAudio]);
+    o.onProgress(12, say('Transcribing speech...', 'Распознаём речь...'));
+    const full = fs.existsSync(fullAudio) ? await transcribe(fullAudio, workDir, 'transcript_full.json') : { words: [] as Word[], segments: [] as any[], language: undefined };
+    o.onProgress(20, say('Picking the best moments...', 'Выбираем лучшие моменты...'));
+    const keep = await selectHighlights({ words: full.words, segments: full.segments, duration: layout.maxSeconds, target: layout.cutTo, prompt: o.prompt, cost });
+    srcFile = await cutSource(o.sourceFile, keep, workDir);
+    const words = remapToCut(full.words, keep);
+    const segments = remapToCut(full.segments as any[], keep).map((sg: any) => {
+      const from = words.findIndex((w) => w.start >= sg.start - 0.05);
+      let to = from; while (to + 1 < words.length && words[to + 1].end <= sg.end + 0.05) to++;
+      return { ...sg, from: Math.max(0, from), to: Math.max(0, to) };
+    });
+    fs.writeFileSync(path.join(workDir, 'transcript.json'), JSON.stringify({ words, segments, language: full.language }));
+    const total = keep.reduce((n, r) => n + r.end - r.start, 0);
+    notes.push(`cut to ${Math.round(total)}s (${keep.length} moment${keep.length > 1 ? 's' : ''} kept from ${Math.round(layout.maxSeconds)}s)`);
+  }
+  const { base, audio, duration, reframe } = await normaliseSource(srcFile, workDir, { reframe: layout.reframe, maxSeconds: layout.cutTo ? 0 : layout.maxSeconds });
+  if (reframe?.ok) notes.push(`Smart Reframe: vertical crop follows the ${reframe.method === 'face' ? 'speaker\'s face' : reframe.method === 'person' ? 'person' : 'main action'}${reframe.shots && reframe.shots > 1 ? ` across ${reframe.shots} shots` : ''}`);
+  o.onProgress(layout.cutTo ? 24 : 18, say('Transcribing speech...', 'Распознаём речь...'));
   const tr = await transcribe(audio, workDir);
   o.onProgress(30, say('Planning the edit...', 'Планируем монтаж...'));
-  const raw = await askPlanner(SOURCE_PLAN_SYSTEM(cfg), `Video duration: ${duration.toFixed(1)}s. Speech language: ${tr.language || 'none'}.\nTranscript:\n${transcriptForLLM(tr.words) || '(no speech)'}\n\nUser request: "${o.prompt}"`, cost, 'edit plan (footage)');
+  // long videos: scale the number of edits with the length (the rules' counts are for short clips)
+  const mins = duration / 60;
+  const lvlRate = cfg.level === 'low' ? 40 : cfg.level === 'high' ? 18 : 25;
+  const scaleHint = duration > 150
+    ? `\nThis video is ${mins.toFixed(1)} minutes long${curFrame().orientation === 'landscape' ? ' (horizontal 16:9 long-form)' : ''}: plan about ${Math.min(120, Math.round(duration / lvlRate))} inserts, ${Math.min(40, Math.max(3, Math.round(duration / 45)))} headlines and ${Math.min(30, Math.max(2, Math.round(duration / 90)))} overlays spread evenly over the WHOLE video (these counts override the numbers in the rules).`
+    : '';
+  const raw = await askPlanner(SOURCE_PLAN_SYSTEM(cfg), `Video duration: ${duration.toFixed(1)}s. Speech language: ${tr.language || 'none'}.${scaleHint}\nTranscript:\n${transcriptForLLM(tr.words) || '(no speech)'}\n\nUser request: "${o.prompt}"`, cost, 'edit plan (footage)');
+  const maxOverlays = duration > 150 ? Math.max(cfg.maxOverlays, Math.min(30, Math.round(duration / 90))) : cfg.maxOverlays;
   const plan: SourcePlan = {
     subtitles: raw.subtitles !== false, translate_to: raw.translate_to || null, dub: !!raw.dub,
     headlines: Array.isArray(raw.headlines) ? raw.headlines.filter((h: any) => h?.phrase) : [],
     inserts: (Array.isArray(raw.inserts) ? raw.inserts : []).filter((x: any) => x?.phrase && (x.search_query || x.visual_description))
       .map((x: any) => ({ ...x, display: ['fullscreen', 'rounded', 'square'].includes(x.display) ? x.display : 'fullscreen', media_type: ['stock_video', 'stock_photo', 'ai_photo'].includes(x.media_type) ? x.media_type : 'stock_photo' })),
-    overlays: (Array.isArray(raw.overlays) ? raw.overlays : []).filter((x: any) => x?.trigger_word && x?.element).slice(0, cfg.maxOverlays),
+    overlays: (Array.isArray(raw.overlays) ? raw.overlays : []).filter((x: any) => x?.trigger_word && x?.element).slice(0, maxOverlays),
   };
   let style: CaptionStyle = { ...DEFAULT_STYLE, ...(o.style || {}) };
   if (raw.style) style = applyStyleOp(style, raw.style);
@@ -541,10 +628,9 @@ export async function runSourceEdit(o: {
     ensureHighEditStockInserts(plan, tr.words, duration, o.prompt);
     timePlan(plan, tr.words, duration);
   }
-  const notes: string[] = [];
   o.onProgress(45, say('Finding matching footage and photos...', 'Подбираем подходящие видео и фото...'));
   await prepareInsertMedia(plan, tr.words, workDir, cost, cfg, notes);
-  const st: SourceState = { base, audio, duration, words: tr.words, segments: tr.segments, language: tr.language, plan, style, level: cfg.level, translated: null };
+  const st: SourceState = { base, audio, duration, words: tr.words, segments: tr.segments, language: tr.language, plan, style, level: cfg.level, translated: null, aspect: curFrame().aspect, layout, reframe };
   if (plan.translate_to && tr.words.length) {
     o.onProgress(70, say('Translating...', 'Переводим...'));
     st.translated = await translate(st, plan.translate_to, !!plan.dub, workDir, cost, o.voice || 'alloy', cfg);
@@ -568,7 +654,13 @@ Operations:
 - {"op":"translate","to":"ISO code or null to remove translation","dub":true|false}
 Return ONLY JSON {"ops":[...],"summary":"..."}`;
 
-export async function applySourceEdit(o: { state: SourceState; request: string; workDir: string; outVideo: string; outPoster: string; cost: CostTracker; onProgress: Progress; ru: boolean; voice?: string }) {
+type SourceReEditInput = { state: SourceState; request: string; workDir: string; outVideo: string; outPoster: string; cost: CostTracker; onProgress: Progress; ru: boolean; voice?: string };
+
+export function applySourceEdit(o: SourceReEditInput) {
+  return withFrame(frameFor(o.state.aspect), () => applySourceEditInFrame(o));
+}
+
+async function applySourceEditInFrame(o: SourceReEditInput) {
   const st: SourceState = JSON.parse(JSON.stringify(o.state));
   const { workDir, cost } = o;
   const say = (en: string, r: string) => (o.ru ? r : en);

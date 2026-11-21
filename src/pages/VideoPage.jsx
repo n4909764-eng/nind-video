@@ -376,7 +376,11 @@ export const VideoPage = () => {
           )}
 
           {isCompleted && hasVideo && !isProcessing && (
-            <div className="video-player-card video-player-card--small" data-testid="video-player-card">
+            <div
+              className={`video-player-card video-player-card--small${project?.aspect === "16:9" ? " video-player-card--landscape" : ""}`}
+              data-testid="video-player-card"
+              data-aspect={project?.aspect || "9:16"}
+            >
               <video
                 key={videoVersion}
                 src={`${BACKEND_URL}${project.video_url}?t=${videoVersion}`}

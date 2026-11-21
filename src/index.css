@@ -9831,3 +9831,34 @@ body {
   .info-main { padding-top: 32px; }
   .info-toc ol { columns: 1; }
 }
+
+/* === Long-form (horizontal 16:9) videos === */
+.video-player-card--landscape,
+.video-player-card--small.video-player-card--landscape {
+  aspect-ratio: 16 / 9;
+  max-width: 600px;
+  border-radius: 18px;
+}
+.creation-card-content:has(.format-badge) img,
+.creation-card-content:has(.format-badge) video {
+  object-fit: contain;
+  background: #000;
+}
+.format-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  background: rgba(15, 15, 17, 0.78);
+  color: #ffffff;
+  border: 0.5px solid rgba(255, 255, 255, 0.18);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border-radius: 26px;
+  z-index: 3;
+  pointer-events: none;
+}

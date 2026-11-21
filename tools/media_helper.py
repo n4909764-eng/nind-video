@@ -48,7 +48,8 @@ def cmd_align(audio, script_path, out_path, lang=None):
             for k in range(n):
                 times[i1 + k] = (st + (en - st) * k / n, st + (en - st) * (k + 1) / n)
     # interpolate gaps (deleted words)
-    dur = hw[-1]['end'] if hw else 0.0
+    # trailing words whisper missed are spread up to the real end of the audio (not squeezed at the last heard word)
+    dur = max(hw[-1]['end'] if hw else 0.0, len(samples) / 16000.0 - 0.15)
     i = 0
     while i < len(tokens):
         if times[i] is None:
@@ -194,7 +195,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return ' '.join(parts)
 
     # --- regular subtitles: short chunks (<=3 words / ~20 chars), each word appears exactly when spoken
-    sub_y = int(H * 0.72)
+    # layout (defaults = vertical 9:16; horizontal passes smaller fonts / lower safe area / longer lines)
+    sub_y = int(H * float(spec.get('sub_y_frac', 0.72)))
+    max_words = int(spec.get('sub_max_words', 3))
+    side = int(spec.get('side_margin', 45))
     chunks, cur = [], []
     for k, w in enumerate(words):
         if in_head[k]:
@@ -202,7 +206,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             continue
         cand = cur + [w]
         txt = ' '.join(x['w'] for x in cand)
-        if cur and (len(cand) > 3 or m_bold.width(txt, sub_fs) > W - 90 or re.search(r'[.!?;:,]$', cur[-1]['w'])):
+        if cur and (len(cand) > max_words or m_bold.width(txt, sub_fs) > W - 2 * side or re.search(r'[.!?;:,]$', cur[-1]['w'])):
             chunks.append(cur); cur = [w]
         else:
             cur = cand
@@ -229,7 +233,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 lines.append([(k, w)]); cur = []
                 continue
             cand = cur + [(k, w)]
-            if cur and m_xb.width(' '.join(x[1]['w'] for x in cand), hl_fs) > W - 100:
+            if cur and m_xb.width(' '.join(x[1]['w'] for x in cand), hl_fs) > W - max(100, 2 * side):
                 lines.append(cur); cur = [(k, w)]
             else:
                 cur = cand
@@ -240,7 +244,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         t1 = min([hw[-1]['end'] + 0.9] + later + nxt_sub[:1] + [total])
         t1 = max(t1, hw[-1]['end'] + 0.15)
         lh = hl_fs * 1.12
-        top = H * 0.44 - lh * (len(lines) - 1) / 2
+        top = H * float(spec.get('head_y_frac', 0.44)) - lh * (len(lines) - 1) / 2
         for li, line in enumerate(lines):
             y = int(top + li * lh)
             fs = hl_fs

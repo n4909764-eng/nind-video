@@ -10,6 +10,8 @@ import https from 'https';
 import dotenv from 'dotenv';
 import { runVideoPipeline, newCostTracker, CostTracker, levelCfg, normLevel, Level, ffmpeg } from './videoPipeline';
 import { applyCreatedEdit, runSourceEdit, applySourceEdit, SourceState } from './editEngine';
+import { planCreation, estimateCreation, runLongVideoPipeline, decideSourceLayout } from './longForm';
+import { probeVideo } from './smartReframe';
 import { CaptionStyle } from './captionStyle';
 import { startGoogleAuth, handleGoogleCallback, consumeGoogleTicket, authOrigin } from './googleAuth';
 
@@ -71,6 +73,14 @@ interface Project {
   edit_notes?: string[];
   edit_summary?: string;
   voice?: string;
+  // output format: short = vertical 9:16 (default), long = horizontal 16:9 long-form
+  format?: 'short' | 'long';
+  aspect?: '9:16' | '16:9';
+  target_seconds?: number | null;
+  format_reason?: string;
+  duration?: number;
+  chapters?: { title: string; start: number }[];
+  description?: string;
 }
 
 interface User {
@@ -313,6 +323,9 @@ async function processVideoGeneration(projectId: string, isModification = false,
       project.style = r.state.style;
       project.words = r.state.words;
       project.title = r.title;
+      project.aspect = r.state.aspect || '9:16';
+      project.duration = r.state.duration;
+      project.format = project.aspect === '16:9' || r.state.duration > 300 ? 'long' : 'short';
       project.edit_notes = r.notes;
       audioFile = r.state.audio;
     } else if (project.kind === 'source' && isModification && project.source_state) {
@@ -325,7 +338,7 @@ async function processVideoGeneration(projectId: string, isModification = false,
     } else if (isModification && project.scenes?.length) {
       // structured edit: only the requested change, existing assets/voice/timings reused
       const r = await applyCreatedEdit({
-        project: { scenes: project.scenes as any, words: project.words || [], full_script: project.full_script || '', style: project.style, level: project.level, voice: project.voice, language: lang, format_id: project.format_id, prompt: project.prompt },
+        project: { scenes: project.scenes as any, words: project.words || [], full_script: project.full_script || '', style: project.style, level: project.level, voice: project.voice, language: lang, format_id: project.format_id, prompt: project.prompt, aspect: project.aspect },
         request: modificationPrompt, attachments: editAttachments, workDir, outVideo, outPoster, cost, onProgress: updateProgress, ru,
       });
       project.scenes = r.scenes;
@@ -336,8 +349,24 @@ async function processVideoGeneration(projectId: string, isModification = false,
       project.edit_notes = r.notes;
       project.edit_summary = r.summary;
       audioFile = r.audioFile;
+    } else if ((project.target_seconds || 0) >= 150) {
+      // long / chaptered video (usually horizontal 16:9)
+      const result = await runLongVideoPipeline({
+        projectId, prompt: project.prompt, language: lang, format: project.format_id || 'auto', workDir, outVideo, outPoster,
+        voice: project.voice, level: project.level, style: project.style, attachedImages: attached, onProgress: updateProgress, cost,
+        aspect: project.aspect || '16:9', targetSeconds: project.target_seconds!,
+      });
+      project.scenes = result.scenes;
+      project.full_script = result.full_script;
+      project.words = result.words;
+      project.title = result.title;
+      project.chapters = result.chapters;
+      project.description = result.description;
+      project.duration = result.duration;
+      audioFile = result.audioFile;
     } else {
       const result = await runVideoPipeline({
+        aspect: project.aspect,
         projectId,
         prompt: project.prompt,
         language: lang,
@@ -704,7 +733,7 @@ app.get('/api/formats', (_req: Request, res: Response) => {
 });
 
 // Video Generation
-app.post('/api/video/generate', (req: Request, res: Response) => {
+app.post('/api/video/generate', async (req: Request, res: Response) => {
   const {
     prompt,
     format_id = 'auto',
@@ -744,12 +773,53 @@ app.post('/api/video/generate', (req: Request, res: Response) => {
     });
   }
 
+  // Format: short vertical by default; long-form horizontal only when the prompt asks for it.
+  // Uploads: decided from the footage (orientation/length) + the prompt.
+  let capUsd = cfg.capUsd;
+  let fmt: { format: 'short' | 'long'; aspect: '9:16' | '16:9'; target_seconds: number | null; reason: string };
+  if (source_video_url) {
+    let probe = { w: 0, h: 0, duration: 0 };
+    try {
+      const local = path.resolve(__dirname, String(source_video_url).replace(/^https?:\/\/[^/]+/, '').replace(/^\/api\//, '').replace(/^\//, ''));
+      if (local.startsWith(UPLOADS_DIR) && fs.existsSync(local)) probe = await probeVideo(local);
+    } catch { /* decided again in the worker */ }
+    const lay = decideSourceLayout(probe, prompt);
+    const mins = (lay.cutTo || lay.maxSeconds || 0) / 60;
+    fmt = { format: lay.aspect === '16:9' || (lay.cutTo || lay.maxSeconds) > 300 ? 'long' : 'short', aspect: lay.aspect, target_seconds: lay.cutTo, reason: lay.reason };
+    if (mins > 2) capUsd = cfg.capUsd * Math.min(25, mins / 2); // edits of long footage scale with length
+  } else {
+    const plan = planCreation(prompt);
+    fmt = { format: plan.format, aspect: plan.aspect, target_seconds: plan.target_seconds, reason: plan.reason };
+    if (plan.chaptered) {
+      const est = estimateCreation(plan, level);
+      console.log(`[FORMAT] ${plan.reason}; estimate $${est.usd} (${est.credits} credits, min ${est.minCredits}), ${est.chapters} chapters, ~${est.scenes} scenes`);
+      if (available < est.minCredits) {
+        return res.status(402).json({
+          error: 'Insufficient credits',
+          message: isRussian
+            ? `Недостаточно кредитов для видео на ~${est.minutes} мин: нужно примерно ${est.credits} кредитов (минимум ${est.minCredits}, чтобы начать), доступно ${available}. Выберите длительность покороче или пополните баланс.`
+            : `Not enough credits for a ~${est.minutes}-minute video: it needs about ${est.credits} credits (at least ${est.minCredits} to start), you have ${available}. Choose a shorter length or top up.`,
+          required: est.minCredits,
+          estimated: est.credits,
+          current: available,
+          format: plan.format,
+          target_seconds: plan.target_seconds,
+        });
+      }
+      capUsd = Math.max(cfg.capUsd, est.usd * 1.3);
+    }
+  }
+
   const projectId = `proj_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-  const budgetUsd = budgetFor(available, cfg.capUsd);
+  const budgetUsd = budgetFor(available, capUsd);
   const newProject: Project = {
     id: projectId,
     user_id: targetUser.user_id,
     credits_reserved: Math.ceil(budgetUsd / USD_PER_CREDIT),
+    format: fmt.format,
+    aspect: fmt.aspect,
+    target_seconds: fmt.target_seconds,
+    format_reason: fmt.reason,
     level,
     voice: typeof voice === 'string' ? voice : undefined,
     style: style && typeof style === 'object' ? style : undefined,
@@ -781,6 +851,9 @@ app.post('/api/video/generate', (req: Request, res: Response) => {
     project_id: projectId,
     status: 'pending',
     message: 'Generation started',
+    format: fmt.format,
+    aspect: fmt.aspect,
+    target_seconds: fmt.target_seconds,
     remaining_credits: targetUser.credits,
     available_credits: availableCredits(targetUser),
   });
@@ -829,8 +902,9 @@ app.post('/api/video/:id/modify', (req: Request, res: Response) => {
       });
     }
     original.user_id = targetUser.user_id;
-    original.credits_reserved = Math.min(available, 100);
-    editBudget = budgetFor(available, 1.0);
+    original.credits_reserved = Math.min(available, original.format === 'long' ? 1000 : 100);
+    // long videos: a re-voice / re-render of many scenes costs more than a short edit
+    editBudget = budgetFor(available, original.format === 'long' ? Math.max(1.0, ((original.duration || original.target_seconds || 600) / 60) * 0.2) : 1.0);
   }
 
   original.prompt = newPrompt;

@@ -1805,6 +1805,11 @@ export const MainPage = () => {
                                   modified
                                 </span>
                               )}
+                              {video.aspect === '16:9' && (
+                                <span className="format-badge" data-testid={`format-badge-${video.id}`}>
+                                  16:9
+                                </span>
+                              )}
                               {video.poster_url ? (
                                 <img 
                                   src={`${BACKEND_URL}${video.poster_url}`} 
