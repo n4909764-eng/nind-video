@@ -8,3 +8,4 @@ coverage/
 !.env.example
 uploads/work_*/
 test-output/
+models/

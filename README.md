@@ -44,6 +44,17 @@ $0.01 of real API cost = 1 credit, charged after the job; each job has a spendin
 | `WHOP_PLAN_*` | built-in ids | optional plan id overrides (see `.env.example`) |
 | `WHOP_TOPUP_CHECKOUT_URL` | – | top-up checkout (TODO: Top Up prices not set yet; `/api/topup` is a stub) |
 | `PORT` | 3000 | |
+| `MODERATION_MODEL` | `google/gemini-2.5-flash-lite` | prompt safety classifier |
+| `NSFW_BLOCK_THRESHOLD` / `NSFW_SOFT_THRESHOLD` / `NSFW_MAX_FRAMES` | 0.8 / 0.6 / 24 | local NSFW check (see Content moderation) |
+| `NSFW_FAIL_CLOSED` / `MODERATION_DISABLED` | 0 / 0 | |
+
+## Content moderation
+
+`moderation.ts` + `tools/nsfw_check.py`. Runs before any credits are reserved; a blocked request returns `422 {error: "content_policy"}` with "This request violates our content policy." and is never charged.
+
+- **Prompts** (create, edit, translate): local keyword filter for sexual content involving minors (blocks with no API call, always fail-closed), then `MODERATION_MODEL` with strict JSON `{allowed, category}` — categories `sexual_minors, sexual_explicit, sexual_deepfake, violent_gore, extremism, dangerous_instructions, hate_harassment, self_harm, fraud_deception`. ~300–400 ms, ~$0.00004 per uncached check; in-memory cache by SHA-256 of the prompt (7 days, 5000 entries). If the classifier errors or times out (15 s) the prompt is **allowed** and logged `[MOD] ... fail-open`.
+- **Media**: Falconsai/nsfw_image_detection (ViT) as int8 ONNX (`onnx-community/nsfw_image_detection-ONNX`, ~85 MB, onnxruntime CPU, ~300 MB RAM per check, max 2 at once). Uploaded images, uploaded videos (12 evenly spaced frames + keyframes, max 24, 224 px) and AI-generated images. Blocked if any frame ≥ `NSFW_BLOCK_THRESHOLD` (0.8) or 2+ frames ≥ `NSFW_SOFT_THRESHOLD` (0.6); blocked uploads are deleted, blocked generated images are dropped (the scene falls back to stock). ~0.6 s per image, ~4.5 s per 1-minute 1080p HEVC video on 4 threads. Checker crash → allowed + logged (set `NSFW_FAIL_CLOSED=1` to block instead).
+- **Strikes** (`users.*.mod_violations` in `data/db.json`): 3 violations in 24 h → creating/uploading paused 24 h (`mod_blocked_until`); 10 total → `mod_flagged: true` (disabled until an admin removes it). Search the log for `[MOD] ADMIN REVIEW`.
 
 ## Subscriptions (Whop)
 

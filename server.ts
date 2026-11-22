@@ -12,6 +12,7 @@ import { runVideoPipeline, newCostTracker, CostTracker, levelCfg, normLevel, Lev
 import { applyCreatedEdit, runSourceEdit, applySourceEdit, SourceState } from './editEngine';
 import { planCreation, estimateCreation, runLongVideoPipeline, decideSourceLayout } from './longForm';
 import { probeVideo } from './smartReframe';
+import { moderatePrompt, moderateMedia, recordViolation, restriction, POLICY_MSG, FILE_POLICY_MSG, Violation } from './moderation';
 import { CaptionStyle } from './captionStyle';
 import { startGoogleAuth, handleGoogleCallback, consumeGoogleTicket, authOrigin, mergeGoogleProfile, GoogleProfile } from './googleAuth';
 
@@ -113,6 +114,10 @@ interface User {
   cancel_at_period_end?: boolean;
   ever_subscribed?: boolean;      // had any paid subscription (not eligible for the Starter intro price)
   starter_promo_used?: boolean;
+  // content moderation (see moderation.ts)
+  mod_violations?: Violation[];
+  mod_blocked_until?: string;
+  mod_flagged?: boolean;       // set after 10 violations: generation disabled until an admin clears it
 }
 
 interface Database {
@@ -383,11 +388,39 @@ function availableCredits(user: User): number {
 
 const DEFAULT_AVATAR = '/assets/profile-icon.png';
 
+/**
+ * Content-policy gate for anything that takes a user prompt. Runs BEFORE credits are reserved.
+ * Returns false (and has answered the request) when the prompt or the account is blocked.
+ */
+async function promptAllowed(user: User, prompt: string, res: Response, kind = 'prompt'): Promise<boolean> {
+  const why = restriction(user);
+  if (why) { res.status(403).json({ error: 'account_restricted', message: why }); return false; }
+  const v = await moderatePrompt(prompt);
+  if (v.source === 'model') console.log(`[MOD] ${kind} ${v.allowed ? 'ok' : 'BLOCKED'} (${v.category}) ${v.ms}ms $${(v.usd || 0).toFixed(6)}`);
+  if (v.allowed) return true;
+  recordViolation(user, 'prompt', v.category);
+  saveDb();
+  res.status(422).json({ error: 'content_policy', category: v.category, message: POLICY_MSG });
+  return false;
+}
+
+/** Local NSFW check of a just-uploaded file; deletes it and answers 422 when blocked. */
+async function uploadAllowed(user: User, file: string, res: Response): Promise<boolean> {
+  const v = await moderateMedia(file);
+  if (v.allowed) return true;
+  try { fs.unlinkSync(file); } catch { /* ignore */ }
+  recordViolation(user, 'upload', 'nsfw');
+  saveDb();
+  res.status(422).json({ error: 'content_policy', category: 'nsfw', message: FILE_POLICY_MSG });
+  return false;
+}
+
 /** API-facing user: always expose `picture` (alias of a real avatar URL). */
 function publicUser(user: User, extra: Record<string, unknown> = {}) {
   const picture = user.picture || (user.avatar && user.avatar !== DEFAULT_AVATAR ? user.avatar : undefined);
+  const { mod_violations: _mv, ...rest } = user;
   return {
-    ...user,
+    ...rest,
     is_creator: isCreator(user),
     picture: picture || undefined,
     avatar: user.avatar || picture || DEFAULT_AVATAR,
@@ -925,6 +958,10 @@ app.post('/api/video/generate', async (req: Request, res: Response) => {
     });
   }
 
+  // Content policy before any credits are reserved: a blocked prompt is never charged.
+  // (Runs after the cheap balance check so empty accounts don't cost a moderation call.)
+  if (!(await promptAllowed(targetUser, prompt, res, 'generate'))) return;
+
   // Format: short vertical by default; long-form horizontal only when the prompt asks for it.
   // Uploads: decided from the footage (orientation/length) + the prompt.
   let capUsd = cfg.capUsd;
@@ -1036,7 +1073,7 @@ function ownProject(req: Request, res: Response): { user: User; project: Project
 }
 
 // Modify Video Project
-app.post('/api/video/:id/modify', (req: Request, res: Response) => {
+app.post('/api/video/:id/modify', async (req: Request, res: Response) => {
   const own = ownProject(req, res);
   if (!own) return;
   const original = own.project;
@@ -1045,7 +1082,13 @@ app.post('/api/video/:id/modify', (req: Request, res: Response) => {
   }
 
   const newPrompt = req.body.prompt || original.prompt;
+  if (typeof newPrompt !== 'string' || newPrompt.length > 4000) return res.status(400).json({ error: 'Prompt is too long (max 4000 characters).' });
   const attachments = req.body.attachments || [];
+  if (original.status === 'processing' || original.status === 'pending') {
+    return res.status(409).json({ error: 'busy', message: 'This video is still being processed.' });
+  }
+  // Content policy before anything is reserved (the await below must not race a second edit)
+  if (!(await promptAllowed(own.user, newPrompt, res, 'edit'))) return;
   if (req.body.language) {
     original.language = req.body.language;
   }
@@ -1055,7 +1098,7 @@ app.post('/api/video/:id/modify', (req: Request, res: Response) => {
   let editBudget = 0.3;
   const targetUser = own.user;
   if (targetUser) {
-    if (original.status === 'processing' || original.status === 'pending') {
+    if ((original.status as string) === "processing" || (original.status as string) === "pending") { // may have changed during the moderation await
       return res.status(409).json({ error: 'busy', message: 'This video is still being processed.' });
     }
     const available = availableCredits(targetUser);
@@ -1164,6 +1207,8 @@ function uploadGate(req: Request, res: Response, next: any) {
   const user = requireUser(req, res);
   if (!user) return;
   if (!rateOk(`upl:${user.user_id}`, 120, 60 * 60_000)) return res.status(429).json({ error: 'rate_limited', message: 'Too many uploads. Please wait a bit.' });
+  const why = restriction(user);
+  if (why) return res.status(403).json({ error: 'account_restricted', message: why });
   (req as any).nindUser = user;
   next();
 }
@@ -1172,6 +1217,8 @@ app.post('/api/upload', uploadGate, upload.single('file'), async (req: Request, 
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
+  const upUser: User = (req as any).nindUser;
+  if (!(await uploadAllowed(upUser, req.file.path, res))) return;
   const fileUrl = `/api/uploads/${req.file.filename}`;
   const thumbnailUrl = await makeUploadThumbnail(req.file.path, req.file.originalname, req.file.mimetype);
   res.json({
@@ -1187,6 +1234,8 @@ app.post('/api/upload', uploadGate, upload.single('file'), async (req: Request, 
 app.post('/api/upload/init', (req: Request, res: Response) => {
   const user = requireUser(req, res);
   if (!user) return;
+  const why = restriction(user);
+  if (why) return res.status(403).json({ error: 'account_restricted', message: why });
   const { filename, total_chunks } = req.body;
   // basename only + media extension only (prevents ../ path traversal when the chunks are assembled)
   const safeName = path.basename(String(filename || 'file.bin')).replace(/[^\w.\-]+/g, '_').slice(-80);
@@ -1247,6 +1296,7 @@ app.post('/api/upload/complete', (req: Request, res: Response) => {
   });
   writeStream.end(async () => {
     if (res.headersSent) return;
+    if (!(await uploadAllowed(user, finalPath, res))) return;
     const thumbnailUrl = await makeUploadThumbnail(finalPath, session.filename);
     res.json({
       url: fileUrl,

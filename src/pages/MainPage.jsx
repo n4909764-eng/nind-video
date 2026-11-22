@@ -1363,6 +1363,8 @@ export const MainPage = () => {
       if (error?.response?.data?.error === 'creator_required') {
         toast.error(error.response.data?.message || HIGH_LOCKED_MSG, { id: 'high-locked' });
         setLevel('default');
+      } else if (['content_policy', 'account_restricted'].includes(error?.response?.data?.error)) {
+        toast.error(error.response.data.message);
       } else if (error?.response?.status === 402) {
         toast.error(error.response.data?.message || (currentLang === 'ru' ? 'Недостаточно кредитов' : 'Insufficient credits'));
       } else {
@@ -1438,7 +1440,8 @@ export const MainPage = () => {
             }
             return prev.filter(a => a.id !== id);
           });
-          toast.error(tr('uploadError') || "Не удалось загрузить файл. Попробуйте ещё раз.");
+          const policyMsg = err?.response?.data?.error === 'content_policy' || err?.response?.data?.error === 'account_restricted' ? err.response.data.message : null;
+          toast.error(policyMsg || tr('uploadError') || "Не удалось загрузить файл. Попробуйте ещё раз.");
         }
       })();
     });

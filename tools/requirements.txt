@@ -3,3 +3,5 @@ rembg[cpu]>=2.0
 fonttools>=4.0
 pillow>=10.0
 opencv-python-headless>=4.8,<5
+onnxruntime>=1.17
+numpy>=1.24

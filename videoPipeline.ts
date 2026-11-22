@@ -814,7 +814,14 @@ async function imageFromResponse(res: any, out: string): Promise<boolean> {
   }
   if (!b64) return false;
   fs.writeFileSync(out, Buffer.from(b64, 'base64'));
-  if (fs.statSync(out).size > 1024) { await stripProvenance(out); return true; }
+  if (fs.statSync(out).size > 1024) {
+    await stripProvenance(out);
+    // generated images pass the same local NSFW check as uploads before they reach a video
+    const { moderateMedia } = await import('./moderation');
+    const v = await moderateMedia(out);
+    if (!v.allowed) { console.warn(`[MOD] generated image rejected (nsfw ${v.max.toFixed(2)}): ${path.basename(out)}`); try { fs.unlinkSync(out); } catch { /* ignore */ } return false; }
+    return true;
+  }
   return false;
 }
 

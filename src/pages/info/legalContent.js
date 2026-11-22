@@ -1,5 +1,5 @@
 // Legal documents for nind ai. Effective date: November 21, 2026.
-const D = "November 21, 2026";
+const D = "November 22, 2026";
 const E = "support@nind.pro";
 
 export const terms = {
@@ -158,7 +158,7 @@ export const privacy = {
       "We do **not** use your content to train our own AI models, we do not sell your personal data, and we do not use your data for targeted advertising. We do not make decisions that produce legal or similarly significant effects about you based solely on automated processing.",
     ] },
     { h: "4. Third-party AI processing", body: [
-      "To create and edit videos, the relevant parts of your content (for example your prompt, script text, images, or extracted audio for transcription, translation or voiceover) are sent to third-party AI model providers. We access models through **OpenRouter**, which routes requests to providers such as **OpenAI** and **Google (Gemini)**. Speech transcription may also run on our own servers.",
+      "To create and edit videos, the relevant parts of your content (for example your prompt, script text, images, or extracted audio for transcription, translation or voiceover) are sent to third-party AI model providers (prompts are also sent to one for an automated content-safety check before work starts). We access models through **OpenRouter**, which routes requests to providers such as **OpenAI** and **Google (Gemini)**. Speech transcription may also run on our own servers.",
       "Search terms derived from your prompt (not your account details) are sent to stock media libraries such as Wikimedia Commons, Openverse, Pexels and Pixabay to find suitable footage and images.",
       "We choose providers and settings that do not use API data for training where such options are available, but each provider processes data under its own terms and policies.",
     ] },
@@ -325,6 +325,7 @@ export const rules = {
         "**Harassment, bullying, threats** or content that encourages violence against people or groups.",
         "**Hate speech** — content that attacks or dehumanises people based on race, ethnicity, nationality, religion, disability, sex, gender identity, sexual orientation, age or similar characteristics.",
         "Content that glorifies or promotes terrorism, violent extremism, self-harm or suicide.",
+        "Graphic gore, or **instructions for making weapons, explosives or drugs** or otherwise causing serious harm.",
         "**Deceptive misinformation** likely to cause real-world harm, including fake news presented as real, fabricated evidence, and dangerous health claims.",
         "**Election manipulation** — content that misleads people about how, when or where to vote, fakes statements by candidates or officials, or is part of a coordinated influence campaign.",
         "Scams, fraud, fake endorsements or misleading advertising.",
@@ -345,7 +346,9 @@ export const rules = {
       "Be honest with your audience. Label videos as AI-generated or AI-altered where the law (for example the EU AI Act for deepfakes) or the platform you publish on requires it, and never present synthetic footage of real people or events as authentic.",
     ] },
     { h: "5. Enforcement", body: [
-      "We use automated checks and human review, and act on reports from users and rights holders. Depending on severity, we may refuse a request, remove content, restrict features, remove credits, or suspend or permanently ban an account, and we may report content to law enforcement where required. If you think we made a mistake, reply to our notice or write to support@nind.pro and we will review it.",
+      "**Automated moderation.** Prompts for creating, editing and translating videos are checked automatically before any work starts: obvious violations are caught by a filter on our servers, and other prompts are classified by an AI model provider accessed through OpenRouter. Uploaded images and videos (sampled frames) and AI-generated images are checked for nudity and sexual content by a model that runs on our own servers. A blocked request is refused with a notice and **no credits are charged** for it.",
+      "**Repeated violations.** Each blocked request or file is recorded on your account. After 3 violations within 24 hours, creating and uploading is paused for 24 hours. After 10 violations in total, creating is disabled until our team reviews the account. Automated checks can make mistakes — if you think a request was blocked wrongly, write to support@nind.pro.",
+      "We also use human review, and act on reports from users and rights holders. Depending on severity, we may refuse a request, remove content, restrict features, remove credits, or suspend or permanently ban an account, and we may report content to law enforcement where required. If you think we made a mistake, reply to our notice or write to support@nind.pro and we will review it.",
     ] },
     { h: "6. Report a violation", body: [
       "See [Report abuse](/report-abuse) to report content or copyright infringement.",

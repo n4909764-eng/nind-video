@@ -211,7 +211,7 @@ export const VideoPage = () => {
           );
         } catch (err) {
           console.error("Attachment upload error:", err);
-          toast.error("Не удалось загрузить файл");
+          toast.error(["content_policy", "account_restricted"].includes(err?.response?.data?.error) ? err.response.data.message : "Не удалось загрузить файл");
           setAttachments((curr) => curr.filter((a) => a.id !== attachId));
         }
       })();
