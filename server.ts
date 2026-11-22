@@ -1,4 +1,4 @@
-import { PLANS, findPlan, planByVariant, createCheckout, verifyWebhook, pick, PlanDef } from './whop';
+import { PLANS, findPlan, planByVariant, createCheckout, createCheckoutFor, verifyWebhook, pick, PlanDef, TOPUPS, topUpByVariant, STARTER_PROMO, fetchStarterPromo, invalidatePromoCache } from './whop';
 import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -111,6 +111,8 @@ interface User {
   next_credit_at?: string;      // annual plans: next monthly credit refill
   period_end?: string;
   cancel_at_period_end?: boolean;
+  ever_subscribed?: boolean;      // had any paid subscription (not eligible for the Starter intro price)
+  starter_promo_used?: boolean;
 }
 
 interface Database {
@@ -122,6 +124,8 @@ interface Database {
   whop_payments?: Record<string, string>;    // payment id -> user id (credits granted once per payment)
   whop_checkouts?: Record<string, { user_id: string; plan_key: string; created_at: string }>;
   whop_unmatched?: any[];                    // paid events we could not map to a user (manual review)
+  starter_promo_count?: number;              // Starter intro ($12.99) purchases seen by webhook
+  whop_topups?: Record<string, { user_id: string; credits: number; created_at: string }>;
   support_requests?: SupportRequest[];
   sessions?: Record<string, SessionRec>;     // sha256(token) -> session
 }
@@ -331,8 +335,30 @@ const USD_PER_CREDIT = 0.01;
 const MIN_GENERATION_CREDITS = Number(process.env.MIN_GENERATION_CREDITS || 10); // must hold at least this to start
 const MIN_EDIT_CREDITS = Number(process.env.MIN_EDIT_CREDITS || 3);
 const DEFAULT_SIGNUP_CREDITS = Number(process.env.WELCOME_CREDITS || 20);
-const MIN_TOPUP = 500;
-const MAX_TOPUP = 50000;
+
+/** Creator plan (any credit size) with an active subscription: unlocks the High generation level. */
+function isCreator(user?: User): boolean {
+  if (!user) return false;
+  const active = user.subscription_status === 'active' || user.subscription_status === 'trialing';
+  return active && (String(user.plan_key || '').startsWith('creator') || user.plan === 'pro' || user.plan === 'creator');
+}
+const HIGH_LOCKED_MSG = 'High generation mode is exclusive to Creator Plan';
+
+/** First-time buyer: never had a subscription and never used the intro price. */
+function starterPromoEligible(user?: User): boolean {
+  if (!user) return true; // signed-out visitors see the offer; checkout re-checks after sign-in
+  return !user.ever_subscribed && !user.starter_promo_used && !user.whop_membership_id && !user.plan_key && (!user.plan || user.plan === 'free');
+}
+
+/** Intro price is live while fewer than 300 buyers used it (Whop promo usage + our own webhook counter). */
+async function starterPromoState() {
+  const w = await fetchStarterPromo();
+  const local = db.starter_promo_count || 0;
+  const used = Math.max(local, w.uses ?? 0);
+  const limit = Math.min(STARTER_PROMO.limit, w.stock ?? STARTER_PROMO.limit);
+  const active = (w.status === null || w.status === 'active') && used < limit;
+  return { active, used, limit, remaining: Math.max(0, limit - used) };
+}
 
 /** The job's spending limit: never more than the user's available balance (and the level's cap). */
 function budgetFor(available: number, capUsd: number) {
@@ -362,6 +388,7 @@ function publicUser(user: User, extra: Record<string, unknown> = {}) {
   const picture = user.picture || (user.avatar && user.avatar !== DEFAULT_AVATAR ? user.avatar : undefined);
   return {
     ...user,
+    is_creator: isCreator(user),
     picture: picture || undefined,
     avatar: user.avatar || picture || DEFAULT_AVATAR,
     ...extra,
@@ -874,6 +901,9 @@ app.post('/api/video/generate', async (req: Request, res: Response) => {
   const isRussian = String(language).toLowerCase().startsWith('ru');
   const targetUser = requireUser(req, res);
   if (!targetUser) return;
+  if (level === 'high' && !isCreator(targetUser)) {
+    return res.status(403).json({ error: 'creator_required', message: HIGH_LOCKED_MSG });
+  }
   if (!rateOk(`gen:${targetUser.user_id}`, 20, 60 * 60_000)) {
     return res.status(429).json({ error: 'rate_limited', message: 'Too many videos started in the last hour. Please wait a bit.' });
   }
@@ -1040,6 +1070,7 @@ app.post('/api/video/:id/modify', (req: Request, res: Response) => {
       });
     }
     original.user_id = targetUser.user_id;
+    if (original.level === 'high' && !isCreator(targetUser)) original.level = 'default'; // High is Creator-only
     original.credits_reserved = Math.min(available, original.format === 'long' ? 1000 : 100);
     // long videos: a re-voice / re-render of many scenes costs more than a short edit
     editBudget = budgetFor(available, original.format === 'long' ? Math.max(1.0, ((original.duration || original.target_seconds || 600) / 60) * 0.2) : 1.0);
@@ -1258,6 +1289,7 @@ function activateSubscription(user: User, plan: PlanDef, membershipId?: string |
   user.billing_cycle = plan.cycle;
   user.subscription_status = 'active';
   user.cancel_at_period_end = false;
+  user.ever_subscribed = true;
   if (membershipId) user.whop_membership_id = membershipId;
 }
 
@@ -1295,10 +1327,30 @@ function processWhopEvent(evt: any): string {
   if (type === 'payment.succeeded') {
     const payId = String(d.id || '');
     if (payId && db.whop_payments![payId]) return 'duplicate_payment';
+    const topup = topUpByVariant(pick.variant(d));
+    if (topup || pick.meta(d).nind_topup) {
+      const pack = topup || TOPUPS.find((t) => String(t.credits) === String(pick.meta(d).nind_topup));
+      if (!pack) return 'ignored_unknown_topup';
+      const user = findWhopUser(d);
+      if (!user) { db.whop_unmatched!.push({ at: new Date().toISOString(), type, payment: payId, variant: pack.variantId, email: pick.email(d) }); return 'unmatched_user'; }
+      // Purchased credits are not subscription credits: they never expire with the month.
+      user.credits = (user.credits || 0) + pack.credits;
+      user.last_deposit = Math.max(user.last_deposit || 0, user.credits);
+      if (payId) db.whop_payments![payId] = user.user_id;
+      if (!db.whop_topups) db.whop_topups = {};
+      db.whop_topups[payId || `t_${Date.now()}`] = { user_id: user.user_id, credits: pack.credits, created_at: new Date().toISOString() };
+      console.log(`[whop] top-up ${payId} -> ${user.user_id} +${pack.credits} credits`);
+      return 'topup_granted';
+    }
     const plan = planByVariant(pick.variant(d)) || PLANS.find((p) => p.key === pick.meta(d).nind_plan);
     if (!plan) return 'ignored_unknown_plan';
     const user = findWhopUser(d);
     if (!user) { db.whop_unmatched!.push({ at: new Date().toISOString(), type, payment: payId, variant: plan.variantId, email: pick.email(d) }); return 'unmatched_user'; }
+    const promo = pick.promo(d);
+    const promoUsed = plan.key === STARTER_PROMO.planKey && !user.starter_promo_used &&
+      (promo === STARTER_PROMO.id.toLowerCase() || promo === STARTER_PROMO.code.toLowerCase() ||
+        (!promo && pick.meta(d).nind_promo === 'starter_intro' && !(Number(d.subtotal ?? d.total ?? d.usd_total ?? 0) >= STARTER_PROMO.regular)));
+    if (promoUsed) { user.starter_promo_used = true; db.starter_promo_count = (db.starter_promo_count || 0) + 1; invalidatePromoCache(); }
     activateSubscription(user, plan, pick.membership(d));
     if (d.user_id || d.user?.id) user.whop_user_id = d.user_id || d.user?.id;
     grantSubscriptionPeriod(user, plan);
@@ -1371,7 +1423,18 @@ setInterval(refillAnnualCredits, 60 * 60 * 1000).unref?.();
 setTimeout(refillAnnualCredits, 15000).unref?.();
 
 app.get('/api/subscription/plans', (_req: Request, res: Response) => {
-  res.json({ plans: PLANS.map(({ key, tier, name, credits, cycle, price }) => ({ key, tier, name, credits, cycle, price })) });
+  res.json({
+    plans: PLANS.map(({ key, tier, name, credits, cycle, price }) => ({ key, tier, name, credits, cycle, price })),
+    topups: TOPUPS.map(({ credits, price }) => ({ credits, price })),
+  });
+});
+
+// Starter intro offer for the Upgrade page: { active, eligible, price, regular, remaining }
+app.get('/api/subscription/offer', async (req: Request, res: Response) => {
+  const user = sessionUser(req);
+  const st = await starterPromoState();
+  const eligible = starterPromoEligible(user);
+  res.json({ starter_intro: { active: st.active, eligible, show: st.active && eligible, price: STARTER_PROMO.price, regular: STARTER_PROMO.regular, remaining: st.remaining, limit: st.limit } });
 });
 
 // Body: { user_id, tier: 'starter'|'creator', credits?: 3000|6000|9000, cycle: 'monthly'|'annually' }
@@ -1383,10 +1446,12 @@ app.post('/api/subscription/checkout', async (req: Request, res: Response) => {
   if (!plan) return res.status(400).json({ error: 'unknown_plan' });
   const sessionId = `chk_${crypto.randomBytes(8).toString('hex')}`;
   try {
-    const co = await createCheckout(plan, user.user_id, `${publicUrl(req)}/subscription/success?session_id=${sessionId}`);
+    let promoCode: string | undefined;
+    if (plan.key === STARTER_PROMO.planKey && starterPromoEligible(user) && (await starterPromoState()).active) promoCode = STARTER_PROMO.code;
+    const co = await createCheckout(plan, user.user_id, `${publicUrl(req)}/subscription/success?session_id=${sessionId}`, promoCode);
     db.whop_checkouts![sessionId] = { user_id: user.user_id, plan_key: plan.key, created_at: new Date().toISOString() };
     saveDb();
-    res.json({ url: co.url, session_id: sessionId, mode: co.mode, plan: plan.key });
+    res.json({ url: co.url, session_id: sessionId, mode: co.mode, plan: plan.key, intro_price: !!promoCode });
   } catch (e: any) {
     console.error('[whop] checkout error', e?.message);
     res.status(502).json({ error: 'checkout_failed', message: 'Could not open checkout. Please try again.' });
@@ -1404,25 +1469,22 @@ app.get('/api/subscription/status/:sessionId', (req: Request, res: Response) => 
   res.json({ status: paid ? 'active' : expired ? 'expired' : 'pending', payment_status: paid ? 'paid' : 'unpaid', plan: chk.plan_key, credits: user?.credits });
 });
 
-// Credit top-up (subscribers only). Creates a payment-provider checkout.
-app.post('/api/topup', (req: Request, res: Response) => {
+// Credit top-up (subscribers only): one-time Whop checkout for a fixed pack; credits arrive with payment.succeeded.
+app.post('/api/topup', async (req: Request, res: Response) => {
   const user = requireUser(req, res);
   if (!user) return;
-  const credits = Math.floor(Number(req.body?.credits));
-  if (!isFinite(credits) || credits < MIN_TOPUP || credits > MAX_TOPUP) {
-    return res.status(400).json({ error: 'invalid_amount', message: `Enter between ${MIN_TOPUP} and ${MAX_TOPUP} credits.` });
-  }
+  const pack = TOPUPS.find((t) => t.credits === Math.floor(Number(req.body?.credits)));
+  if (!pack) return res.status(400).json({ error: 'invalid_amount', message: 'Choose one of the credit packs.' });
   const active = user.subscription_status === 'active' || (!!user.plan && user.plan !== 'free');
   if (!active) return res.status(403).json({ error: 'subscription_required', message: 'Top-ups are available with an active subscription.' });
-  // TODO(whop): create a Whop checkout session for `credits` (price per credit from the plan),
-  // pass metadata { user_id, credits }, return its purchase URL here, and credit the balance
-  // from the Whop `payment.succeeded` webhook (never from this endpoint).
-  const checkoutUrl = process.env.WHOP_TOPUP_CHECKOUT_URL || '';
-  if (!checkoutUrl) return res.status(501).json({ error: 'payments_not_configured', message: 'Payments are being set up. Please try again soon.', credits });
-  const url = new URL(checkoutUrl);
-  url.searchParams.set('metadata[user_id]', user.user_id);
-  url.searchParams.set('metadata[credits]', String(credits));
-  res.json({ checkout_url: url.toString(), credits });
+  if (!rateOk(`topup:${user.user_id}`, 30, 60 * 60_000)) return res.status(429).json({ error: 'rate_limited' });
+  try {
+    const co = await createCheckoutFor(pack.variantId, { nind_user_id: user.user_id, nind_topup: String(pack.credits) }, `${publicUrl(req)}/`);
+    res.json({ checkout_url: co.url, credits: pack.credits, price: pack.price, mode: co.mode });
+  } catch (e: any) {
+    console.error('[whop] top-up checkout error', e?.message);
+    res.status(502).json({ error: 'checkout_failed', message: 'Could not open checkout. Please try again.' });
+  }
 });
 
 // User Management & Settings

@@ -169,7 +169,6 @@ export default function HelpSupportPage() {
     const user = readStoredUser();
     if (user?.email && !supportEmail) setSupportEmail(user.email);
     setShowSupportForm(true);
-    setTimeout(() => subjectInputRef.current?.focus(), 150);
   };
 
   const handleEverythingClearYes = () => {
@@ -415,6 +414,9 @@ export default function HelpSupportPage() {
         .hs-field input { height: 56px; }
         .hs-field textarea { padding: 16px 0; min-height: 120px; resize: vertical; }
         .hs-field-area { align-items: flex-start; }
+        .hs-support-popup { padding: 12px 24px 36px; }
+        .hs-support-title { font-size: 22px; font-weight: 700; color: #fff; text-align: center; margin: 8px 0 8px; letter-spacing: -0.01em; }
+        .hs-support-text { font-size: 15px; line-height: 1.45; color: #8E8E93; text-align: center; margin: 0 auto 24px; max-width: 320px; }
       `}</style>
 
       <div className="bg-[#141414] pt-5 pb-8 px-5">
@@ -529,9 +531,6 @@ export default function HelpSupportPage() {
             aria-labelledby="faq-popup-title"
           >
             <div className="popup-handle" />
-            <button type="button" className="hs-close" onClick={closeOverlays} aria-label="Close" data-testid="faq-popup-close">
-              <X className="w-4 h-4" />
-            </button>
             <h3 id="faq-popup-title" className="hs-popup-title">
               {openFaq.question}
             </h3>
@@ -560,79 +559,25 @@ export default function HelpSupportPage() {
       )}
 
       {showSupportForm && (
-        <div className="popup-overlay" onClick={() => setShowSupportForm(false)} data-testid="support-form-popup">
+        <div className="popup-overlay" onClick={() => setShowSupportForm(false)} data-testid="support-popup">
           <div
-            className="confirm-popup hs-popup relative"
+            className="confirm-popup hs-popup hs-support-popup"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
-            aria-labelledby="support-form-title"
+            aria-labelledby="support-popup-title"
           >
             <div className="popup-handle" />
-            <button
-              type="button"
-              className="hs-close"
-              onClick={() => setShowSupportForm(false)}
-              aria-label="Close"
+            <h3 id="support-popup-title" className="hs-support-title">Support@nind.pro</h3>
+            <p className="hs-support-text">If you need help, please write to the technical support email</p>
+            <a
+              href={`mailto:${SUPPORT_EMAIL}${supportSubject ? `?subject=${encodeURIComponent(supportSubject)}` : ""}`}
+              onClick={() => setTimeout(() => setShowSupportForm(false), 300)}
+              className="w-full h-14 rounded-full bg-white text-black text-[16px] font-semibold flex items-center justify-center hover:bg-zinc-200 active:scale-[0.99] transition-all"
+              data-testid="support-contact"
             >
-              <X className="w-4 h-4" />
-            </button>
-            <div className="w-14 h-14 rounded-full bg-[#1D1E20] flex items-center justify-center mx-auto mt-1 mb-3">
-              <Mail className="w-6 h-6 text-white stroke-[1.75]" />
-            </div>
-            <h3 id="support-form-title" className="confirm-popup-title" style={{ marginBottom: 8 }}>
-              Contact support
-            </h3>
-            <p className="text-sm text-[#8E8E93] text-center mb-5">
-              Your message will be sent to {SUPPORT_EMAIL}.
-            </p>
-            <label className="sr-only" htmlFor="support-email">Your email</label>
-            <div className="hs-field">
-              <input
-                id="support-email"
-                type="email"
-                value={supportEmail}
-                onChange={(e) => setSupportEmail(e.target.value)}
-                placeholder="Your email"
-                autoComplete="email"
-                data-testid="support-email"
-              />
-            </div>
-            <label className="sr-only" htmlFor="support-subject">Subject</label>
-            <div className="hs-field">
-              <input
-                id="support-subject"
-                ref={subjectInputRef}
-                type="text"
-                value={supportSubject}
-                onChange={(e) => setSupportSubject(e.target.value)}
-                placeholder="Subject"
-                data-testid="support-subject"
-              />
-            </div>
-            <label className="sr-only" htmlFor="support-message">Message</label>
-            <div className="hs-field hs-field-area">
-              <textarea
-                id="support-message"
-                value={supportMessage}
-                onChange={(e) => setSupportMessage(e.target.value)}
-                placeholder="How can we help?"
-                data-testid="support-message"
-              />
-            </div>
-            <button
-              type="button"
-              disabled={sending}
-              onClick={handleSendSupport}
-              data-testid="support-send"
-              className={`w-full h-14 rounded-full font-semibold text-[16px] flex items-center justify-center transition-all ${
-                sending
-                  ? "bg-[#2C2C2E] text-zinc-500 cursor-not-allowed"
-                  : "bg-white text-black hover:bg-zinc-200 cursor-pointer shadow-md active:scale-[0.99]"
-              }`}
-            >
-              {sending ? "Sending…" : "Send"}
-            </button>
+              Contact
+            </a>
           </div>
         </div>
       )}

@@ -3,8 +3,11 @@ import App from './App.tsx';
 import './index.css';
 // @ts-ignore -- plain JS module
 import { installSessionInterceptors } from './lib/session.js';
+// @ts-ignore -- plain JS module
+import { installSheetGestures } from './lib/sheetGestures.js';
 
 installSessionInterceptors();
+installSheetGestures();
 createRoot(document.getElementById('root')!).render(<App />);
 
 // Prevent accidental Vite full-reloads triggered by dynamic user uploads

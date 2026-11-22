@@ -113,10 +113,6 @@ const AppearancePopup = ({ onClose, lang = "ru" }) => {
         className="appearance-popup"
         ref={popupRef}
         onClick={(e) => e.stopPropagation()}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
       >
         <div className="popup-handle" />
         <h2 className="popup-title">{t.title}</h2>

@@ -1,4 +1,13 @@
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+
+export const HIGH_LOCKED_MSG = "High generation mode is exclusive to Creator Plan";
+
+const LockIcon = ({ className }) => (
+  <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+    <path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 1 1 6 0v3H9Z" />
+  </svg>
+);
 
 // Work level picker (Low / Default / High) shown next to the "+" in the prompt input.
 // The slider snaps ONLY to the three positions.
@@ -13,7 +22,11 @@ export const loadLevel = () => {
   try { const v = localStorage.getItem(LEVEL_KEY); return LEVELS.some((l) => l.id === v) ? v : "default"; } catch (_) { return "default"; }
 };
 
-export const LevelPicker = ({ value, onChange }) => {
+// Dots, knob and labels share one coordinate system: the track minus its rounded ends (TRACK_INSET px each side).
+const TRACK_INSET = 6;
+const stopPos = (p) => `calc(${TRACK_INSET}px + (100% - ${TRACK_INSET * 2}px) * ${p})`;
+
+export const LevelPicker = ({ value, onChange, highLocked = false }) => {
   const [open, setOpen] = useState(false);
   const [dragPct, setDragPct] = useState(null);
   const wrapRef = useRef(null);
@@ -33,19 +46,27 @@ export const LevelPicker = ({ value, onChange }) => {
 
   const select = (i) => {
     const l = LEVELS[Math.max(0, Math.min(2, i))];
+    if (l.id === "high" && highLocked) {
+      toast.error(HIGH_LOCKED_MSG, { id: "high-locked" });
+      return;
+    }
     try { localStorage.setItem(LEVEL_KEY, l.id); } catch (_) { /* ignore */ }
     onChange && onChange(l.id);
   };
 
   const pctFromEvent = (clientX) => {
     const r = trackRef.current.getBoundingClientRect();
-    return Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+    const p = Math.max(0, Math.min(1, (clientX - r.left - TRACK_INSET) / Math.max(1, r.width - TRACK_INSET * 2)));
+    return highLocked ? Math.min(p, 0.5) : p; // the knob cannot be dragged onto a locked High
   };
 
   const onPointerDown = (e) => {
     e.preventDefault();
     const move = (ev) => setDragPct(pctFromEvent(ev.clientX));
     const up = (ev) => {
+      const r = trackRef.current.getBoundingClientRect();
+      const rawP = (ev.clientX - r.left - TRACK_INSET) / Math.max(1, r.width - TRACK_INSET * 2);
+      if (highLocked && rawP > 0.75) select(2); // shows the Creator-only message
       const p = pctFromEvent(ev.clientX);
       setDragPct(null);
       select(Math.round(p * 2)); // snap: 0 / 0.5 / 1
@@ -62,7 +83,7 @@ export const LevelPicker = ({ value, onChange }) => {
     if (e.key === "ArrowRight" || e.key === "ArrowUp") { e.preventDefault(); select(idx + 1); }
   };
 
-  const pct = dragPct !== null ? dragPct * 100 : idx * 50;
+  const frac = dragPct !== null ? dragPct : idx / 2;
 
   return (
     <div className="level-picker" ref={wrapRef}>
@@ -83,18 +104,21 @@ export const LevelPicker = ({ value, onChange }) => {
               <button
                 key={l.id}
                 type="button"
-                className={`level-label ${i === idx ? "active" : ""}`}
+                className={`level-label ${i === idx ? "active" : ""} ${l.id === "high" && highLocked ? "locked" : ""}`}
+                style={{ left: stopPos(i / 2) }}
                 onClick={() => select(i)}
+                aria-disabled={l.id === "high" && highLocked ? true : undefined}
                 data-testid={`level-option-${l.id}`}
               >
                 {l.label}
+                {l.id === "high" && highLocked && <LockIcon className="level-lock" />}
               </button>
             ))}
           </div>
           <div className="level-track" ref={trackRef} onPointerDown={onPointerDown}>
-            <div className="level-track-fill" style={{ width: `${pct}%`, transition: dragPct !== null ? "none" : undefined }} />
+            <div className="level-track-fill" style={{ width: `calc(${TRACK_INSET * 2}px + (100% - ${TRACK_INSET * 2}px) * ${frac})`, transition: dragPct !== null ? "none" : undefined }} />
             {[0, 1, 2].map((i) => (
-              <span key={i} className={`level-stop ${i <= idx ? "on" : ""}`} style={{ left: `${i * 50}%` }} />
+              <span key={i} className={`level-stop ${i <= idx ? "on" : ""}`} style={{ left: stopPos(i / 2) }} data-testid={`level-stop-${i}`} />
             ))}
             <div
               className="level-knob"
@@ -105,7 +129,7 @@ export const LevelPicker = ({ value, onChange }) => {
               aria-valuenow={idx}
               aria-valuetext={current.label}
               onKeyDown={onKeyDown}
-              style={{ left: `${pct}%`, transition: dragPct !== null ? "none" : undefined }}
+              style={{ left: stopPos(frac), transition: dragPct !== null ? "none" : undefined }}
               data-testid="level-knob"
             />
           </div>

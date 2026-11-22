@@ -157,6 +157,13 @@ const UpgradePage = () => {
   const [proCreditsOpen, setProCreditsOpen] = useState(false);
   const [openFaqId, setOpenFaqId] = useState(null);
   const [checkoutLoading, setCheckoutLoading] = useState(null);
+  // Starter intro price ($12.99 first month) for the first 300 first-time subscribers; server decides.
+  const [starterIntro, setStarterIntro] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    fetch(`${API}/subscription/offer`).then((r) => r.json()).then((d) => { if (alive) setStarterIntro(d?.starter_intro || null); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   useEffect(() => {
     if (!proCreditsOpen) return;
@@ -335,17 +342,20 @@ const UpgradePage = () => {
   const PricingCard = ({ plan, planKey }) => {
     const isMonthly = billingCycle === "monthly";
     const price = isMonthly ? plan.monthlyPrice : plan.annualPrice;
+    const promo = planKey === "starter" && isMonthly && !!starterIntro?.show;
 
     return (
-      <div className="pricing-card">
-        <div className="pricing-card-top">
+      <div className="pricing-card" data-testid={`pricing-card-${planKey}`}>
+        <div className={`pricing-card-top${promo ? " promo" : ""}`} data-testid={promo ? "starter-promo" : undefined}>
           <div className="pricing-card-header">
             <h3 className="pricing-card-name">{plan.name}</h3>
             <div className="pricing-card-price-row">
-              <div className="pricing-price">${price}</div>
+              {promo && <span className="pricing-price-old">${plan.monthlyPrice}</span>}
+              <div className="pricing-price">${promo ? starterIntro.price : price}</div>
               <span className="pricing-period">{t("perMonth")}</span>
             </div>
           </div>
+          {promo && <p className="pricing-promo-note">First month for new subscribers, then ${plan.monthlyPrice}/month</p>}
 
           {/* Credits Box — on Creator, the whole credits pill opens the amount menu */}
           <div className={`pricing-credits-box${plan.hasCreditsDropdown ? " has-dropdown" : ""}`}>

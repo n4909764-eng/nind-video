@@ -7,7 +7,7 @@ import { getSessionToken, clearSession } from "../lib/session";
 import ProfilePage from "../components/custom/ProfilePage";
 import UserAvatar from "../components/custom/UserAvatar";
 import StyleDetailPopup from "../components/custom/StyleDetailPopup";
-import LevelPicker, { loadLevel } from "../components/custom/LevelPicker";
+import LevelPicker, { loadLevel, HIGH_LOCKED_MSG } from "../components/custom/LevelPicker";
 import AttachmentThumb from "../components/custom/AttachmentThumb";
 import { getTranslation, tr, getCurrentLang } from "../utils/translations";
 
@@ -289,6 +289,12 @@ export const MainPage = () => {
   const [isPopupClosing, setIsPopupClosing] = useState(false);
   const [attachments, setAttachments] = useState([]);
   const [level, setLevel] = useState(loadLevel);
+  // High is Creator-only (the server enforces it too)
+  const isCreatorUser = !!user && (user.is_creator === true ||
+    ((user.subscription_status === 'active' || user.subscription_status === 'trialing') &&
+      (String(user.plan_key || '').startsWith('creator') || user.plan === 'pro' || user.plan === 'creator')));
+  const highLocked = !isCreatorUser;
+  useEffect(() => { if (user && highLocked && level === 'high') setLevel('default'); }, [user, highLocked, level]);
   const [isUploading, setIsUploading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [activeTab, setActiveTab] = useState("Все");
@@ -1354,7 +1360,10 @@ export const MainPage = () => {
       
     } catch (error) {
       console.error("Failed to start generation:", error);
-      if (error?.response?.status === 402) {
+      if (error?.response?.data?.error === 'creator_required') {
+        toast.error(error.response.data?.message || HIGH_LOCKED_MSG, { id: 'high-locked' });
+        setLevel('default');
+      } else if (error?.response?.status === 402) {
         toast.error(error.response.data?.message || (currentLang === 'ru' ? 'Недостаточно кредитов' : 'Insufficient credits'));
       } else {
         toast.error(tr('generationError'));
@@ -1672,7 +1681,7 @@ export const MainPage = () => {
                     <PlusIconSolid className="w-5 h-5" />
                   </button>
 
-                  <LevelPicker value={level} onChange={setLevel} />
+                  <LevelPicker value={level} onChange={setLevel} highLocked={highLocked} />
 
                   {selectedFormat && (
                     <div className="style-chip" data-testid="selected-style-chip">
@@ -1957,11 +1966,7 @@ export const MainPage = () => {
           >
             <div 
               className="formats-list-popup"
-              style={{ transform: `translateY(${popupDragY}px)` }}
               onClick={(e) => e.stopPropagation()}
-              onTouchStart={handlePopupTouchStart}
-              onTouchMove={handlePopupTouchMove}
-              onTouchEnd={() => handlePopupTouchEnd(() => setShowFormatsListPopup(false))}
             >
               <div className="popup-drag-handle" />
               

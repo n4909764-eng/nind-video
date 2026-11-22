@@ -159,10 +159,12 @@ export default function StyleDetailPopup({
     ? `translateY(${dragY}px)`
     : undefined;
 
-  const sheetStyle = {
-    transform: sheetTransform,
-    transition: animateBack ? "transform 0.28s cubic-bezier(0.2, 0.9, 0.3, 1)" : undefined,
-  };
+  const sheetStyle = isClosing && dragY > 0
+    ? { transform: "translateY(105%)", transition: "transform 0.3s cubic-bezier(0.22, 1, 0.36, 1)", animation: "none" }
+    : {
+        transform: sheetTransform,
+        transition: animateBack ? "transform 0.45s cubic-bezier(0.22, 1, 0.36, 1)" : undefined,
+      };
 
   const tileStyle = {
     backgroundColor: tileBg,
@@ -215,27 +217,6 @@ export default function StyleDetailPopup({
           {/* Frosted grabber pill — top-center, on the tile */}
           <div className="style-popup-grabber" aria-hidden="true" />
 
-          {/* Close X — top-LEFT, frosted rounded-square, BLACK X icon */}
-          <button
-            className="style-popup-close-x"
-            onClick={handleClose}
-            aria-label="Close"
-            data-testid="style-popup-close-x"
-          >
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.4"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <line x1="6" y1="6" x2="18" y2="18" />
-              <line x1="18" y1="6" x2="6" y2="18" />
-            </svg>
-          </button>
 
           {/* Title + subtitle on the tile */}
           <div className="style-popup-overlay-text">
