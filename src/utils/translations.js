@@ -1,4 +1,10 @@
 import { useState, useEffect } from "react";
+import extraEn from "../i18n/en.js";
+import extraRu from "../i18n/ru.js";
+import extraEs from "../i18n/es.js";
+import extraDe from "../i18n/de.js";
+import extraFr from "../i18n/fr.js";
+import extraPt from "../i18n/pt.js";
 
 // Translations for the app
 export const translations = {
@@ -670,8 +676,19 @@ export const translations = {
   }
 };
 
-export const getTranslation = (lang, key) => {
-  return translations[lang]?.[key] || translations.en[key] || key;
+// Signed-in app strings added later live in src/i18n/<lang>.js and are merged here.
+const EXTRA = { en: extraEn, ru: extraRu, es: extraEs, de: extraDe, fr: extraFr, pt: extraPt };
+Object.keys(EXTRA).forEach((l) => { translations[l] = { ...(translations[l] || {}), ...EXTRA[l] }; });
+
+export const SUPPORTED_LANGS = ["en", "fr", "de", "pt", "es", "ru"];
+
+// Fills {name} placeholders: getTranslation("de", "creditsCount", { n: 500 })
+export const fillParams = (text, params) =>
+  params ? String(text).replace(/\{(\w+)\}/g, (m, k) => (params[k] !== undefined && params[k] !== null ? String(params[k]) : m)) : text;
+
+export const getTranslation = (lang, key, params) => {
+  const raw = translations[lang]?.[key] || translations.en[key] || key;
+  return fillParams(raw, params);
 };
 
 // Helper to get current language code from localStorage (default: en)
@@ -681,7 +698,7 @@ export const getCurrentLang = () => {
 };
 
 // Convenience: translate a key using current language (handy for toast messages)
-export const tr = (key) => getTranslation(getCurrentLang(), key);
+export const tr = (key, params) => getTranslation(getCurrentLang(), key, params);
 
 // Save language and notify all components in real-time
 export const setAppLanguage = (langCode) => {
@@ -707,6 +724,6 @@ export const useAppLanguage = () => {
     };
   }, []);
 
-  const t = (key) => getTranslation(lang, key);
-  return { lang, t };
+  const t = (key, params) => getTranslation(lang, key, params);
+  return { lang, currentLang: lang, t };
 };

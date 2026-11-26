@@ -4,7 +4,7 @@ import { ChevronRight, Search, X, ChevronDown, ChevronUp, Mail } from "lucide-re
 import { toast } from "sonner";
 import axios from "axios";
 import { useAppLanguage } from "../utils/translations";
-import { FAQ_CATEGORIES, FAQ_ITEMS } from "../data/helpFaqs";
+import { getFaqCategories, getFaqItems } from "../data/helpFaqs";
 
 const API = `${process.env.REACT_APP_BACKEND_URL || ""}/api`;
 const SUPPORT_EMAIL = "support@nind.pro";
@@ -110,7 +110,9 @@ function buildMailto({ email, subject, message }) {
 
 export default function HelpSupportPage() {
   const navigate = useNavigate();
-  const { t } = useAppLanguage();
+  const { t, lang } = useAppLanguage();
+  const FAQ_CATEGORIES = useMemo(() => getFaqCategories(lang), [lang]);
+  const FAQ_ITEMS = useMemo(() => getFaqItems(lang), [lang]);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [expanded, setExpanded] = useState(false);
@@ -139,7 +141,7 @@ export default function HelpSupportPage() {
       (item) =>
         item.question.toLowerCase().includes(query) || item.answer.toLowerCase().includes(query)
     );
-  }, [query]);
+  }, [query, FAQ_ITEMS]);
 
   const closeOverlays = useCallback(() => {
     setOpenFaq(null);
@@ -164,7 +166,7 @@ export default function HelpSupportPage() {
     const subject = item ? item.question : (itemOrSubject || "");
     setOpenFaq(null);
     setSupportFaqId(item?.id);
-    setSupportSubject(subject ? `Help: ${subject}` : "Help & Support");
+    setSupportSubject(subject ? `${t("helpSubject")}: ${subject}` : t("helpSupport"));
     setSupportMessage("");
     const user = readStoredUser();
     if (user?.email && !supportEmail) setSupportEmail(user.email);
@@ -181,14 +183,14 @@ export default function HelpSupportPage() {
 
   const handleSendSupport = async () => {
     const email = supportEmail.trim();
-    const subject = supportSubject.trim() || "Help & Support";
+    const subject = supportSubject.trim() || t("helpSupport");
     const message = supportMessage.trim();
     if (!email || !email.includes("@")) {
-      toast.error("Please enter a valid email address.");
+      toast.error(t("invalidEmail"));
       return;
     }
     if (!message) {
-      toast.error("Please write a short message.");
+      toast.error(t("writeShortMessage"));
       return;
     }
     if (sending) return;
@@ -207,14 +209,14 @@ export default function HelpSupportPage() {
       setShowSupportForm(false);
       setSupportMessage("");
       if (r.data?.emailed) {
-        toast.success(`Message sent. We’ll reply to ${email}.`);
+        toast.success(t("messageSentReply", { email }));
       } else {
-        toast.success("Opening your email app to send the message to support@nind.pro.");
+        toast.success(t("openingEmailApp", { email: SUPPORT_EMAIL }));
         window.location.href = r.data?.mailto || mailto;
       }
     } catch (err) {
       // Store failed or endpoint missing: still let the user email support.
-      toast.success("Opening your email app to send the message to support@nind.pro.");
+      toast.success(t("openingEmailApp", { email: SUPPORT_EMAIL }));
       setShowSupportForm(false);
       window.location.href = mailto;
     } finally {
@@ -262,7 +264,7 @@ export default function HelpSupportPage() {
               onClick={() => setExpanded(true)}
               data-testid="faq-more-btn"
             >
-              More <ChevronDown className="w-4 h-4" strokeWidth={2.5} />
+              {t("more")} <ChevronDown className="w-4 h-4" strokeWidth={2.5} />
             </button>
           </div>
         ) : null}
@@ -293,7 +295,7 @@ export default function HelpSupportPage() {
         }}
         data-testid="faq-less-btn"
       >
-        Less <ChevronUp className="w-4 h-4" strokeWidth={2.5} />
+        {t("less")} <ChevronUp className="w-4 h-4" strokeWidth={2.5} />
       </button>
     </div>
   );
@@ -302,7 +304,7 @@ export default function HelpSupportPage() {
     <div className="hs-list" data-testid="faq-search-results">
       {filteredFaqs.length === 0 ? (
         <div className="py-10 text-center text-sm text-[#8E8E93]">
-          No articles found. Try another search, or send a message to {SUPPORT_EMAIL}.
+          {t("noArticles", { email: SUPPORT_EMAIL })}
         </div>
       ) : (
         <div className="upgrade-faq-list">
@@ -428,7 +430,7 @@ export default function HelpSupportPage() {
               data-testid="help-back-btn"
               style={highlightBackButton ? { outline: "1px solid #0096FE", outlineOffset: "2px" } : undefined}
               className="w-12 h-12 rounded-[18px] bg-[#1D1E20] flex items-center justify-center cursor-pointer active:scale-95 transition-all"
-              title="Back"
+              title={t("back")}
             >
               <ChevronLeftTriangle className="w-5 h-5 text-white" />
             </button>
@@ -473,7 +475,7 @@ export default function HelpSupportPage() {
                   searchInputRef.current?.focus();
                 }}
                 className="w-9 h-9 rounded-full bg-[#2A2B2E] text-white/80 hover:text-white flex items-center justify-center mr-1"
-                aria-label="Clear search"
+                aria-label={t("clearSearch")}
               >
                 <X className="w-4 h-4" />
               </button>
@@ -488,7 +490,7 @@ export default function HelpSupportPage() {
       <div className="bg-[#1C1D20] px-5 pt-10 pb-24 min-h-[calc(100vh-270px)]">
         <div className="max-w-xl mx-auto">
           <h2 className="text-2xl sm:text-3xl font-bold text-white mb-6 text-left tracking-tight">
-            {query ? "Search results" : t("faqTitle")}
+            {query ? t("searchResults") : t("faqTitle")}
           </h2>
 
           {query ? renderSearchResults() : expanded ? renderExpandedList() : renderCollapsedList()}
@@ -536,14 +538,14 @@ export default function HelpSupportPage() {
             </h3>
             <FaqAnswer text={openFaq.answer} />
             <div className="hs-help-row">
-              <span className="hs-help-label">Did this help?</span>
+              <span className="hs-help-label">{t("didThisHelp")}</span>
               <button
                 type="button"
                 onClick={closeOverlays}
                 className="h-11 px-6 rounded-full bg-white text-black text-sm font-semibold hover:bg-white/90 active:scale-95 transition-all"
                 data-testid="faq-did-help-yes"
               >
-                Yes
+                {t("yesBtn")}
               </button>
               <button
                 type="button"
@@ -551,7 +553,7 @@ export default function HelpSupportPage() {
                 className="h-11 px-6 rounded-full bg-[#2A2B2E] text-white text-sm font-semibold hover:bg-[#343539] active:scale-95 transition-all"
                 data-testid="faq-did-help-no"
               >
-                No
+                {t("no")}
               </button>
             </div>
           </div>
@@ -569,14 +571,14 @@ export default function HelpSupportPage() {
           >
             <div className="popup-handle" />
             <h3 id="support-popup-title" className="hs-support-title">Support@nind.pro</h3>
-            <p className="hs-support-text">If you need help, please write to the technical support email</p>
+            <p className="hs-support-text">{t("supportPopupText")}</p>
             <a
               href={`mailto:${SUPPORT_EMAIL}${supportSubject ? `?subject=${encodeURIComponent(supportSubject)}` : ""}`}
               onClick={() => setTimeout(() => setShowSupportForm(false), 300)}
               className="w-full h-14 rounded-full bg-white text-black text-[16px] font-semibold flex items-center justify-center hover:bg-zinc-200 active:scale-[0.99] transition-all"
               data-testid="support-contact"
             >
-              Contact
+              {t("contact")}
             </a>
           </div>
         </div>

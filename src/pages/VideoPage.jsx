@@ -1,10 +1,13 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { X, Download, ArrowUp, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
 import AttachmentThumb from "../components/custom/AttachmentThumb";
 import { useAppLanguage } from "../utils/translations";
+import { apiErrorMessage, localizeProgress } from "../utils/apiMessages";
+
+const SPEECH_LOCALES = { en: "en-US", ru: "ru-RU", de: "de-DE", fr: "fr-FR", es: "es-ES", pt: "pt-BR" };
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -25,12 +28,12 @@ const PlusIconSolid = ({ className }) => (
 );
 
 // Rotating verbs inside the placeholder
-const EDIT_VERBS = ["fix", "change", "edit", "rewrite"];
 
 export const VideoPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const { currentLang, t } = useAppLanguage();
+  const EDIT_VERBS = [t("editVerb1"), t("editVerb2"), t("editVerb3"), t("editVerb4")];
   const [project, setProject] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -51,7 +54,7 @@ export const VideoPage = () => {
   const pollTimerRef = useRef(null);
 
   useEffect(() => {
-    const currentVerb = EDIT_VERBS[verbIdx];
+    const currentVerb = EDIT_VERBS[verbIdx % EDIT_VERBS.length] || "";
     let timeout;
     if (isTypingVerb) {
       if (typedVerb.length < currentVerb.length) {
@@ -71,7 +74,7 @@ export const VideoPage = () => {
       }
     }
     return () => clearTimeout(timeout);
-  }, [typedVerb, verbIdx, isTypingVerb]);
+  }, [typedVerb, verbIdx, isTypingVerb, currentLang]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchProject = useCallback(async () => {
     try {
@@ -86,7 +89,7 @@ export const VideoPage = () => {
       }
     } catch (err) {
       console.error("Failed to fetch project:", err);
-      setError("Проект не найден");
+      setError("projectNotFound");
       setIsLoading(false);
     }
   }, [id]);
@@ -105,6 +108,9 @@ export const VideoPage = () => {
     ta.style.height = Math.min(ta.scrollHeight, 220) + "px";
   };
 
+  // Keep the input height in sync with its text, including when it is cleared after sending.
+  useLayoutEffect(() => { autoResize(); }, [editPrompt]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Microphone toggle & speech recognition
   const toggleListening = () => {
     if (isListening) {
@@ -117,7 +123,7 @@ export const VideoPage = () => {
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      toast.error(currentLang === 'ru' ? "Распознавание речи не поддерживается в этом браузере" : "Speech recognition is not supported in this browser");
+      toast.error(t("speechNotSupported"));
       return;
     }
 
@@ -125,7 +131,7 @@ export const VideoPage = () => {
       const recognition = new SpeechRecognition();
       recognition.continuous = true;
       recognition.interimResults = true;
-      recognition.lang = currentLang === 'ru' ? "ru-RU" : "en-US";
+      recognition.lang = SPEECH_LOCALES[currentLang] || "en-US";
 
       let baseText = editPrompt ? editPrompt.trim() : "";
 
@@ -145,7 +151,7 @@ export const VideoPage = () => {
       recognition.onerror = (event) => {
         console.warn("Speech recognition error:", event.error);
         if (event.error === "not-allowed") {
-          toast.error("Доступ к микрофону отклонен");
+          toast.error(t("micDenied"));
           setIsListening(false);
         }
       };
@@ -211,7 +217,7 @@ export const VideoPage = () => {
           );
         } catch (err) {
           console.error("Attachment upload error:", err);
-          toast.error(["content_policy", "account_restricted"].includes(err?.response?.data?.error) ? err.response.data.message : "Не удалось загрузить файл");
+          toast.error(apiErrorMessage(err, "uploadFailed"));
           setAttachments((curr) => curr.filter((a) => a.id !== attachId));
         }
       })();
@@ -238,9 +244,9 @@ export const VideoPage = () => {
       link.href = `${BACKEND_URL}${project.video_url}`;
       link.download = `${project.title || "video"}.mp4`;
       link.click();
-      toast.success("Экспорт начат");
+      toast.success(t("exportStarted"));
     } catch (e) {
-      toast.error("Не удалось экспортировать видео");
+      toast.error(t("exportFailed"));
     } finally {
       setExporting(false);
     }
@@ -278,17 +284,17 @@ export const VideoPage = () => {
         ...project,
         status: "processing",
         progress: 5,
-        progress_message: currentLang === "ru" ? "Применяем правки к видео..." : "Applying edits to video...",
+        progress_message: t("applyingEdits"),
       });
 
-      toast.success(currentLang === "ru" ? "Запрос на изменение видео принят" : "Video edit request received");
+      toast.success(t("editRequestReceived"));
 
       // Start polling project status until completion
       if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
       pollTimerRef.current = setTimeout(fetchProject, 1500);
     } catch (e) {
       console.error("modify failed:", e);
-      toast.error(e?.response?.data?.message || (currentLang === "ru" ? "Не удалось отправить правки" : "Failed to apply edits"));
+      toast.error(apiErrorMessage(e, "editFailed"));
     } finally {
       setSubmittingEdit(false);
     }
@@ -304,7 +310,7 @@ export const VideoPage = () => {
   if (error) {
     return (
       <div className="video-page-loading" data-testid="video-page">
-        <p className="video-page-error">{error}</p>
+        <p className="video-page-error">{t(error)}</p>
         <button onClick={() => navigate("/")} className="video-close-btn" data-testid="back-button">
           <X className="w-5 h-5" />
         </button>
@@ -336,7 +342,7 @@ export const VideoPage = () => {
         onClick={() => navigate(-1)}
         className="video-close-btn video-close-btn--floating"
         data-testid="back-button"
-        aria-label="Close"
+        aria-label={t("close")}
       >
         <X className="w-5 h-5" />
       </button>
@@ -348,7 +354,7 @@ export const VideoPage = () => {
           disabled={exporting}
         >
           <Download className="w-4 h-4" strokeWidth={2.4} />
-          <span>{exporting ? (currentLang === "ru" ? "Экспорт..." : "Exporting...") : "Export"}</span>
+          <span>{exporting ? t("exporting") : t("exportBtn")}</span>
         </button>
       )}
 
@@ -360,17 +366,17 @@ export const VideoPage = () => {
               <div className="processing-ring">
                 <span className="processing-pct">{project?.progress || 0}%</span>
               </div>
-              <p className="processing-msg">{project?.progress_message || (currentLang === "ru" ? "Обработка..." : "Processing...")}</p>
+              <p className="processing-msg">{localizeProgress(project?.progress_message) || t("processing")}</p>
             </div>
           )}
 
           {hasError && (
             <div className="video-page-error-box">
-              <p className="error-title">{currentLang === "ru" ? "Ошибка" : "Error"}</p>
+              <p className="error-title">{t("errorTitle")}</p>
               <p className="error-msg">{project?.error_message || project?.error}</p>
               <button onClick={() => navigate("/")} className="error-retry-btn">
                 <RotateCcw className="w-4 h-4" />
-                {currentLang === "ru" ? "Попробовать снова" : "Try again"}
+                {t("tryAgain")}
               </button>
             </div>
           )}
@@ -427,7 +433,7 @@ export const VideoPage = () => {
                   className="listening-placeholder-overlay"
                   onClick={() => textareaRef.current?.focus()}
                 >
-                  <span>Listening</span>
+                  <span>{t("listening")}</span>
                   <span className="listening-wave-dots">
                     <span className="dot dot-1">.</span>
                     <span className="dot dot-2">.</span>
@@ -457,7 +463,7 @@ export const VideoPage = () => {
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={submittingEdit || isProcessing}
-                aria-label="Attach"
+                aria-label={t("attach")}
                 data-testid="edit-attach-button"
               >
                 <PlusIconSolid className="w-5 h-5" />
@@ -469,7 +475,7 @@ export const VideoPage = () => {
                   type="button"
                   onClick={toggleListening}
                   disabled={submittingEdit || isProcessing}
-                  aria-label="Mic"
+                  aria-label={t("mic")}
                   data-testid="edit-mic-button"
                 >
                   <MicIcon className="w-5 h-5" />

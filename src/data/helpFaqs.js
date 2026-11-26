@@ -1,4 +1,10 @@
-/** In-app Help & Support FAQs (English UI). Keep answers accurate to the current product. */
+import faqRu from "./helpFaqs.i18n/ru.js";
+import faqEs from "./helpFaqs.i18n/es.js";
+import faqDe from "./helpFaqs.i18n/de.js";
+import faqFr from "./helpFaqs.i18n/fr.js";
+import faqPt from "./helpFaqs.i18n/pt.js";
+
+/** In-app Help & Support FAQs (English source). Translations: ./helpFaqs.i18n/<lang>.js. Keep answers accurate to the current product. */
 export const FAQ_CATEGORIES = [
   {
     id: "getting-started",
@@ -230,7 +236,7 @@ export const FAQ_CATEGORIES = [
         id: "top-up",
         question: "What is Top Up, and who can use it?",
         answer:
-          "Top Up lets subscribers buy extra credits (from 500 to 50,000) from the Account page. It is available only with an active subscription. Top-up prices will be shown at checkout; you’ll be redirected to the payment provider. Welcome users without a plan need to subscribe first if they need more than their remaining credits.",
+          "Top Up lets subscribers buy extra credits from the Account page: **$5** — 100 credits, **$20** — 500 credits, **$50** — 1,500 credits, **$100** — 3,500 credits. It is available only with an active subscription, and payment goes through Whop. Users without a plan need to subscribe first if they need more than their remaining credits.",
       },
       {
         id: "refunds",
@@ -314,7 +320,7 @@ export const FAQ_CATEGORIES = [
         id: "contact-support",
         question: "How do I contact support?",
         answer:
-          "Email support@nind.pro. From this Help & Support page you can also open any question, tap **No** under “Did this help?”, and send a short message — we’ll receive it at the same address. Include your account email and a description of what went wrong.",
+          "Email support@nind.pro. On this Help & Support page you can also open any question, tap **No** under “Did this help?” and press **Contact** — your email app opens a new message to the same address. Include your account email and a description of what went wrong.",
       },
     ],
   },
@@ -323,3 +329,25 @@ export const FAQ_CATEGORIES = [
 export const FAQ_ITEMS = FAQ_CATEGORIES.flatMap((category) =>
   category.items.map((item) => ({ ...item, categoryId: category.id, categoryTitle: category.title }))
 );
+
+
+const FAQ_I18N = { ru: faqRu, es: faqEs, de: faqDe, fr: faqFr, pt: faqPt };
+
+/** FAQ categories in the given UI language (falls back to English per item). */
+export const getFaqCategories = (lang) => {
+  const tr = FAQ_I18N[lang];
+  if (!tr) return FAQ_CATEGORIES;
+  return FAQ_CATEGORIES.map((c) => ({
+    ...c,
+    title: tr.categories?.[c.id] || c.title,
+    items: c.items.map((it) => {
+      const row = tr.items?.[it.id];
+      return row ? { ...it, question: row[0] || it.question, answer: row[1] || it.answer } : it;
+    }),
+  }));
+};
+
+export const getFaqItems = (lang) =>
+  getFaqCategories(lang).flatMap((category) =>
+    category.items.map((item) => ({ ...item, categoryId: category.id, categoryTitle: category.title }))
+  );

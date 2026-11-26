@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { tr } from "../../utils/translations";
 
 /**
  * Style detail popup — bottom sheet with horizontal swipe navigation between
@@ -236,7 +237,7 @@ export default function StyleDetailPopup({
           data-testid="style-popup-use-btn"
         >
           <UseStyleIcon className="style-popup-use-icon" />
-          <span>Use Style</span>
+          <span>{tr("useStyle")}</span>
         </button>
       </div>
     </div>

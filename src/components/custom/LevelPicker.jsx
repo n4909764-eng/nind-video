@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { useAppLanguage, tr } from "../../utils/translations";
 
-export const HIGH_LOCKED_MSG = "High generation mode is exclusive to Creator Plan";
+export const highLockedMsg = () => tr("highLocked");
 
 const LockIcon = ({ className }) => (
   <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
@@ -12,9 +13,9 @@ const LockIcon = ({ className }) => (
 // Work level picker (Low / Default / High) shown next to the "+" in the prompt input.
 // The slider snaps ONLY to the three positions.
 export const LEVELS = [
-  { id: "low", label: "Low", caption: "Cost\u2011effective video creation/editing" },
-  { id: "default", label: "Default", caption: "Optimal video creation/editing" },
-  { id: "high", label: "High", caption: "The highest\u2011quality video creation/editing" },
+  { id: "low", labelKey: "levelLow", captionKey: "levelLowCaption" },
+  { id: "default", labelKey: "levelDefault", captionKey: "levelDefaultCaption" },
+  { id: "high", labelKey: "levelHigh", captionKey: "levelHighCaption" },
 ];
 
 const LEVEL_KEY = "nind_level";
@@ -27,6 +28,7 @@ const TRACK_INSET = 6;
 const stopPos = (p) => `calc(${TRACK_INSET}px + (100% - ${TRACK_INSET * 2}px) * ${p})`;
 
 export const LevelPicker = ({ value, onChange, highLocked = false }) => {
+  const { t } = useAppLanguage();
   const [open, setOpen] = useState(false);
   const [dragPct, setDragPct] = useState(null);
   const wrapRef = useRef(null);
@@ -47,7 +49,7 @@ export const LevelPicker = ({ value, onChange, highLocked = false }) => {
   const select = (i) => {
     const l = LEVELS[Math.max(0, Math.min(2, i))];
     if (l.id === "high" && highLocked) {
-      toast.error(HIGH_LOCKED_MSG, { id: "high-locked" });
+      toast.error(t("highLocked"), { id: "high-locked" });
       return;
     }
     try { localStorage.setItem(LEVEL_KEY, l.id); } catch (_) { /* ignore */ }
@@ -95,10 +97,10 @@ export const LevelPicker = ({ value, onChange, highLocked = false }) => {
         aria-expanded={open}
         data-testid="level-pill"
       >
-        {current.label}
+        {t(current.labelKey)}
       </button>
       {open && (
-        <div className="level-popover" role="dialog" aria-label="Work level" data-testid="level-popover">
+        <div className="level-popover" role="dialog" aria-label={t("workLevel")} data-testid="level-popover">
           <div className="level-labels">
             {LEVELS.map((l, i) => (
               <button
@@ -110,7 +112,7 @@ export const LevelPicker = ({ value, onChange, highLocked = false }) => {
                 aria-disabled={l.id === "high" && highLocked ? true : undefined}
                 data-testid={`level-option-${l.id}`}
               >
-                {l.label}
+                {t(l.labelKey)}
                 {l.id === "high" && highLocked && <LockIcon className="level-lock" />}
               </button>
             ))}
@@ -127,13 +129,13 @@ export const LevelPicker = ({ value, onChange, highLocked = false }) => {
               aria-valuemin={0}
               aria-valuemax={2}
               aria-valuenow={idx}
-              aria-valuetext={current.label}
+              aria-valuetext={t(current.labelKey)}
               onKeyDown={onKeyDown}
               style={{ left: stopPos(frac), transition: dragPct !== null ? "none" : undefined }}
               data-testid="level-knob"
             />
           </div>
-          <div className="level-caption" data-testid="level-caption">{current.caption}</div>
+          <div className="level-caption" data-testid="level-caption">{t(current.captionKey)}</div>
         </div>
       )}
     </div>

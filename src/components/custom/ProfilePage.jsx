@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, X, Globe, HelpCircle, LogOut, Trash2, Headph
 import { toast } from "sonner";
 import axios from "axios";
 import { translations, getTranslation, setAppLanguage } from "../../utils/translations";
+import { apiErrorMessage } from "../../utils/apiMessages";
 import UserAvatar from "./UserAvatar";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -27,7 +28,7 @@ const TOPUP_PACKS = [
   { price: 100, credits: 3500 },
 ];
 
-const TopUpPopup = ({ user, onClose, sheetRef }) => {
+const TopUpPopup = ({ user, onClose, sheetRef, t }) => {
   const [busy, setBusy] = useState(null);
 
   const buy = async (pack) => {
@@ -38,7 +39,7 @@ const TopUpPopup = ({ user, onClose, sheetRef }) => {
       if (r.data?.checkout_url) { window.location.href = r.data.checkout_url; return; }
       throw new Error("no_url");
     } catch (err) {
-      toast.error(err?.response?.data?.message || "Could not start the payment. Please try again.");
+      toast.error(apiErrorMessage(err, "paymentStartFailed"));
       setBusy(null);
     }
   };
@@ -47,8 +48,8 @@ const TopUpPopup = ({ user, onClose, sheetRef }) => {
     <div className="popup-overlay" onClick={onClose} data-testid="topup-popup">
       <div className="confirm-popup topup-sheet" ref={sheetRef} onClick={(e) => e.stopPropagation()}>
         <div className="popup-handle" />
-        <h3 className="topup-title">Top up credits</h3>
-        <p className="topup-subtitle">Get more credits to create and edit more videos</p>
+        <h3 className="topup-title">{t("topUpTitle")}</h3>
+        <p className="topup-subtitle">{t("topUpSubtitle")}</p>
         <div className="topup-packs" data-testid="topup-packs">
           {TOPUP_PACKS.map((p) => (
             <div key={p.credits} className="topup-pack-row">
@@ -59,9 +60,9 @@ const TopUpPopup = ({ user, onClose, sheetRef }) => {
                 onClick={() => buy(p)}
                 data-testid={`topup-pack-${p.credits}`}
               >
-                {busy === p.credits ? "Please wait…" : `$${p.price}`}
+                {busy === p.credits ? t("pleaseWait") : `$${p.price}`}
               </button>
-              <div className="topup-pack-credits" aria-label={`${p.credits.toLocaleString("en-US")} credits`}>
+              <div className="topup-pack-credits" aria-label={t("creditsCount", { n: p.credits.toLocaleString("en-US") })}>
                 <CreditsIcon className="topup-pack-icon" color="#FFFFFF" />
                 <span>{p.credits.toLocaleString("en-US")}</span>
               </div>
@@ -186,13 +187,14 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
   const closeTopUp = () => animateClose(topUpPopupRef.current, () => setShowTopUp(false));
 
   // Translation helper
-  const t = (key) => getTranslation(selectedLanguage, key);
+  const t = (key, params) => getTranslation(selectedLanguage, key, params);
 
   // Plan labels with translations
   const getPlanLabel = (plan) => {
     const planKeys = {
       free: 'freePlan',
       start: 'startPlan',
+      starter: 'starterPlan',
       plus: 'plusPlan',
       creator: 'creatorPlan'
     };
@@ -212,7 +214,7 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
     try {
       const response = await axios.get(`${API}/users/check-username/${username}?exclude_user_id=${user.user_id}`);
       if (!response.data.available) {
-        setUsernameError('Username taken');
+        setUsernameError(t('usernameTaken'));
         return false;
       }
       setUsernameError('');
@@ -392,7 +394,7 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
             <span className="credits-label">{t('creditsLeft')}</span>
             {hasSubscription && (
               <button type="button" className="credits-topup-btn" onClick={() => setShowTopUp(true)} data-testid="topup-btn">
-                + Top Up
+                {t('topUpBtn')}
               </button>
             )}
           </div>
@@ -474,7 +476,7 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
                   <Headphones className="settings-menu-icon text-white" />
                   <div className="flex flex-col text-left overflow-hidden flex-1 mr-2 min-w-0">
                     <span className="settings-menu-text text-white leading-tight font-medium">
-                      {chat.title || "Chat 1"}
+                      {chat.title || t("chat1")}
                     </span>
                     {lastMsg ? (
                       <span className="text-[12px] text-[#8E8E93] truncate max-w-[210px] mt-0.5 block overflow-hidden text-ellipsis whitespace-nowrap">
@@ -544,7 +546,7 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
 
         {/* Top Up Popup */}
         {showTopUp && (
-          <TopUpPopup user={user} onClose={closeTopUp} sheetRef={topUpPopupRef} />
+          <TopUpPopup user={user} onClose={closeTopUp} sheetRef={topUpPopupRef} t={t} />
         )}
 
         {/* Confirm Popup */}
@@ -634,7 +636,7 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
                 value={editName}
                 onChange={(e) => setEditName(e.target.value)}
                 className="profile-edit-input-top"
-                placeholder="Name"
+                placeholder={t('namePlaceholder')}
                 data-testid="profile-name-input"
               />
               <div className="profile-input-divider-horizontal"></div>
@@ -647,7 +649,7 @@ export const ProfilePage = ({ user, onBack, onLogout, onUpdateUser, onUpgrade, c
                 }}
                 onBlur={() => editUsername.length >= 3 && checkUsernameAvailability(editUsername)}
                 className="profile-edit-input-bottom"
-                placeholder="Username"
+                placeholder={t('usernamePlaceholder')}
                 data-testid="profile-username-input"
               />
             </div>

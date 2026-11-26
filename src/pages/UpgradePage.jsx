@@ -2,6 +2,8 @@ import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { X, ChevronDown, Check, ChevronRight } from "lucide-react";
 import { useAppLanguage } from "../utils/translations";
+import { apiErrorMessage } from "../utils/apiMessages";
+import { reviewText } from "../data/reviews.i18n";
 import { toast } from "sonner";
 
 const API = `${process.env.REACT_APP_BACKEND_URL || ""}/api`;
@@ -151,7 +153,7 @@ const USER_REVIEWS = [
 
 const UpgradePage = () => {
   const navigate = useNavigate();
-  const { t } = useAppLanguage();
+  const { t, lang } = useAppLanguage();
   const [billingCycle, setBillingCycle] = useState("monthly");
   const [proCredits, setProCredits] = useState(3000);
   const [proCreditsOpen, setProCreditsOpen] = useState(false);
@@ -197,10 +199,10 @@ const UpgradePage = () => {
         body: JSON.stringify({ user_id: userId, tier: planKey === "pro" ? "creator" : "starter", credits: planKey === "pro" ? proCredits : 500, cycle: billingCycle }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.url) throw new Error(data.message || "checkout_failed");
+      if (!res.ok || !data.url) { const err = new Error(data.message || "checkout_failed"); err.response = { status: res.status, data }; throw err; }
       window.location.href = data.url;
     } catch (e) {
-      toast.error("Could not open checkout. Please try again.");
+      toast.error(apiErrorMessage(e, "checkoutFailed"));
       setCheckoutLoading(null);
     }
   };
@@ -351,11 +353,11 @@ const UpgradePage = () => {
             <h3 className="pricing-card-name">{plan.name}</h3>
             <div className="pricing-card-price-row">
               {promo && <span className="pricing-price-old">${plan.monthlyPrice}</span>}
-              <div className="pricing-price">${promo ? starterIntro.price : price}</div>
+              <div className={`pricing-price${promo ? " promo-price" : ""}`} data-testid={promo ? "starter-promo-price" : undefined}>${promo ? starterIntro.price : price}</div>
               <span className="pricing-period">{t("perMonth")}</span>
             </div>
           </div>
-          {promo && <p className="pricing-promo-note">First month for new subscribers, then ${plan.monthlyPrice}/month</p>}
+          {promo && <p className="pricing-promo-note">{t("promoNote", { price: plan.monthlyPrice })}</p>}
 
           {/* Credits Box — on Creator, the whole credits pill opens the amount menu */}
           <div className={`pricing-credits-box${plan.hasCreditsDropdown ? " has-dropdown" : ""}`}>
@@ -367,7 +369,7 @@ const UpgradePage = () => {
                   onClick={() => setProCreditsOpen((open) => !open)}
                   aria-expanded={proCreditsOpen}
                   aria-haspopup="listbox"
-                  aria-label="Select credit amount"
+                  aria-label={t("selectCreditAmount")}
                   data-testid="credits-selector"
                 >
                   <CreditsIcon className="pricing-credits-icon" color="#FFFFFF" />
@@ -486,7 +488,7 @@ const UpgradePage = () => {
 
         {/* What Users Say Section */}
         <div className="upgrade-reviews-section">
-          <h2 className="upgrade-reviews-title">What Users Say</h2>
+          <h2 className="upgrade-reviews-title">{t("whatUsersSay")}</h2>
           <div className="upgrade-reviews-carousel-outer" ref={reviewsScrollerRef}>
             <div className="upgrade-reviews-track">
               {[...USER_REVIEWS, ...USER_REVIEWS].map((review, idx) => (
@@ -509,8 +511,8 @@ const UpgradePage = () => {
                         );
                       })}
                     </div>
-                    <h4 className="upgrade-review-card-title">{review.title}</h4>
-                    <p className="upgrade-review-card-text">{review.text}</p>
+                    <h4 className="upgrade-review-card-title">{reviewText(lang, review.id, "title", review.title)}</h4>
+                    <p className="upgrade-review-card-text">{reviewText(lang, review.id, "text", review.text)}</p>
                   </div>
                   <div className="upgrade-review-bottom">
                     <div className="upgrade-review-author">{review.author}</div>

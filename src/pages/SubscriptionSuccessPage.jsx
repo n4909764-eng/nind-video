@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { CheckCircle, ArrowLeft, Sparkles, Loader2 } from "lucide-react";
 import axios from "axios";
+import { useAppLanguage } from "../utils/translations";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -20,6 +21,7 @@ const generateStars = (count) => {
 
 export const SubscriptionSuccessPage = () => {
   const navigate = useNavigate();
+  const { t } = useAppLanguage();
   const [searchParams] = useSearchParams();
   const sessionId = searchParams.get("session_id");
   
@@ -83,8 +85,8 @@ export const SubscriptionSuccessPage = () => {
         {status === "checking" && (
           <>
             <Loader2 className="w-16 h-16 mx-auto mb-6 text-white/80 animate-spin" />
-            <h1 className="text-2xl font-bold mb-2">Confirming your payment...</h1>
-            <p className="text-white/60">Please wait a moment</p>
+            <h1 className="text-2xl font-bold mb-2">{t("confirmingPayment")}</h1>
+            <p className="text-white/60">{t("pleaseWaitMoment")}</p>
           </>
         )}
 
@@ -93,9 +95,9 @@ export const SubscriptionSuccessPage = () => {
             <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-green-500/20 flex items-center justify-center">
               <CheckCircle className="w-12 h-12 text-green-400" />
             </div>
-            <h1 className="text-3xl font-bold mb-2">Payment successful!</h1>
+            <h1 className="text-3xl font-bold mb-2">{t("paymentSuccessful")}</h1>
             <p className="text-white/60 mb-6">
-              Your subscription is active and the credits are on your balance.
+              {t("subscriptionActive")}
             </p>
             {false && (
               <p className="text-purple-400 font-semibold mb-6">
@@ -107,7 +109,7 @@ export const SubscriptionSuccessPage = () => {
               className="px-8 py-3 rounded-xl bg-white text-black font-semibold hover:bg-white/90 transition-all"
               data-testid="start-creating-btn"
             >
-              Start creating
+              {t("startCreating")}
             </button>
           </>
         )}
@@ -117,15 +119,15 @@ export const SubscriptionSuccessPage = () => {
             <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-yellow-500/20 flex items-center justify-center">
               <Sparkles className="w-12 h-12 text-yellow-400" />
             </div>
-            <h1 className="text-2xl font-bold mb-2">Payment is processing</h1>
+            <h1 className="text-2xl font-bold mb-2">{t("paymentProcessing")}</h1>
             <p className="text-white/60 mb-6">
-              Your payment is still being processed. Credits will appear on your balance shortly.
+              {t("paymentProcessingText")}
             </p>
             <button
               onClick={() => navigate("/")}
               className="px-8 py-3 rounded-xl glass-ios text-white font-semibold hover:bg-white/10 transition-all"
             >
-              Back to home
+              {t("backToHome")}
             </button>
           </>
         )}
@@ -136,18 +138,18 @@ export const SubscriptionSuccessPage = () => {
               <ArrowLeft className="w-12 h-12 text-red-400" />
             </div>
             <h1 className="text-2xl font-bold mb-2">
-              {status === "expired" ? "Session expired" : "Something went wrong"}
+              {status === "expired" ? t("sessionExpired") : t("somethingWrong")}
             </h1>
             <p className="text-white/60 mb-6">
               {status === "expired" 
-                ? "The checkout session expired. Please try again." 
-                : "We could not confirm the payment yet. If you were charged, credits will appear shortly."}
+                ? t("checkoutExpiredText")
+                : t("paymentNotConfirmed")}
             </p>
             <button
               onClick={() => navigate("/upgrade")}
               className="px-8 py-3 rounded-xl glass-ios text-white font-semibold hover:bg-white/10 transition-all"
             >
-              Back to plans
+              {t("backToPlans")}
             </button>
           </>
         )}

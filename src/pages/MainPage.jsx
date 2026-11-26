@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Plus, ArrowUp, X, Loader2, Search, ChevronRight, ChevronLeft, Check, MoreVertical, Download, Edit2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -7,9 +7,12 @@ import { getSessionToken, clearSession } from "../lib/session";
 import ProfilePage from "../components/custom/ProfilePage";
 import UserAvatar from "../components/custom/UserAvatar";
 import StyleDetailPopup from "../components/custom/StyleDetailPopup";
-import LevelPicker, { loadLevel, HIGH_LOCKED_MSG } from "../components/custom/LevelPicker";
+import LevelPicker, { loadLevel } from "../components/custom/LevelPicker";
 import AttachmentThumb from "../components/custom/AttachmentThumb";
 import { getTranslation, tr, getCurrentLang } from "../utils/translations";
+import { apiErrorMessage } from "../utils/apiMessages";
+
+const SPEECH_LOCALES = { en: "en-US", ru: "ru-RU", de: "de-DE", fr: "fr-FR", es: "es-ES", pt: "pt-BR" };
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -203,7 +206,7 @@ const SmoothProgressCard = ({ video, onStop }) => {
           className="modified-badge"
           data-testid={`modified-badge-${video.id}`}
         >
-          modified
+          {tr('modifiedBadge')}
         </span>
       )}
       <div className="creation-generating">
@@ -221,7 +224,7 @@ const SmoothProgressCard = ({ video, onStop }) => {
               e.stopPropagation();
               onStop && onStop(video);
             }}
-            title="Stop generation"
+            title={tr('stopGeneration')}
             data-testid={`stop-generation-${video.id}`}
           >
             <div className="stop-icon" />
@@ -253,7 +256,13 @@ export const MainPage = () => {
   
   // State
   const [prompt, setPrompt] = useState("");
-  const [user, setUser] = useState(null);
+  // Re-measure on every prompt change, so clearing it after sending drops the box back to 2 lines.
+  useLayoutEffect(() => { autoResizeTextarea(); }, [prompt]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Read the signed-in user synchronously so the very first paint is the signed-in shell
+  // (no flash of the anonymous landing while an effect loads it).
+  const [user, setUser] = useState(() => {
+    try { const raw = localStorage.getItem("slind_user"); return raw ? JSON.parse(raw) : null; } catch (_) { return null; }
+  });
 
   // Pull the live credit balance from the server and persist it, so Account
   // always shows what was really charged ($0.01 API cost = 1 credit).
@@ -681,7 +690,7 @@ export const MainPage = () => {
   // Start voice recording
   const startRecording = async () => {
     if (!recognitionRef.current) {
-      alert('Speech recognition is not supported in your browser');
+      toast.error(tr('speechNotSupported'));
       return;
     }
     
@@ -693,7 +702,7 @@ export const MainPage = () => {
       recognitionRef.current.start();
     } catch (err) {
       console.error('Microphone access denied:', err);
-      alert('Please allow microphone access to use voice commands');
+      toast.error(tr('micDenied'));
     }
   };
 
@@ -819,7 +828,7 @@ export const MainPage = () => {
   }, [user?.language]);
 
   // Translation helper
-  const t = (key) => getTranslation(currentLang, key);
+  const t = (key, params) => getTranslation(currentLang, key, params);
 
   const handleLanguageChange = (langCode) => {
     setCurrentLang(langCode);
@@ -848,7 +857,7 @@ export const MainPage = () => {
         const recognition = new SpeechRecognition();
         recognition.continuous = true;
         recognition.interimResults = true;
-        recognition.lang = currentLang === 'ru' ? 'ru-RU' : 'en-US';
+        recognition.lang = SPEECH_LOCALES[currentLang] || 'en-US';
 
         let baseText = prompt ? prompt.trim() : '';
 
@@ -868,7 +877,7 @@ export const MainPage = () => {
         recognition.onerror = (event) => {
           console.warn('Speech recognition error:', event.error);
           if (event.error === 'not-allowed') {
-            toast.error(currentLang === 'ru' ? 'Доступ к микрофону отклонен' : 'Microphone access denied');
+            toast.error(t('micDenied'));
             setIsListening(false);
           }
         };
@@ -885,8 +894,7 @@ export const MainPage = () => {
         setIsListening(false);
       }
     } else {
-      toast.info(currentLang === 'ru' ? 'Говорите... (микрофон включен)' : 'Listening... (Speak now)');
-      setIsListening(true);
+      toast.error(t('speechNotSupported'));
     }
   };
 
@@ -1258,7 +1266,7 @@ export const MainPage = () => {
         if (uploadedUrls.length !== currentAttachments.length) {
           // Safety net — if somehow we landed here mid-upload, bail out
           // gracefully so we don't fire /video/generate with a missing URL.
-          toast.error(tr('uploadError') || "Файл ещё загружается, подождите.");
+          toast.error(t('fileStillUploading'));
           // Restore attachments + prompt so the user can retry.
           setPrompt(currentPrompt);
           setAttachments(currentAttachments);
@@ -1361,14 +1369,10 @@ export const MainPage = () => {
     } catch (error) {
       console.error("Failed to start generation:", error);
       if (error?.response?.data?.error === 'creator_required') {
-        toast.error(error.response.data?.message || HIGH_LOCKED_MSG, { id: 'high-locked' });
+        toast.error(t('highLocked'), { id: 'high-locked' });
         setLevel('default');
-      } else if (['content_policy', 'account_restricted'].includes(error?.response?.data?.error)) {
-        toast.error(error.response.data.message);
-      } else if (error?.response?.status === 402) {
-        toast.error(error.response.data?.message || (currentLang === 'ru' ? 'Недостаточно кредитов' : 'Insufficient credits'));
       } else {
-        toast.error(tr('generationError'));
+        toast.error(apiErrorMessage(error, 'generationError'));
       }
     }
   };
@@ -1440,8 +1444,7 @@ export const MainPage = () => {
             }
             return prev.filter(a => a.id !== id);
           });
-          const policyMsg = err?.response?.data?.error === 'content_policy' || err?.response?.data?.error === 'account_restricted' ? err.response.data.message : null;
-          toast.error(policyMsg || tr('uploadError') || "Не удалось загрузить файл. Попробуйте ещё раз.");
+          toast.error(apiErrorMessage(err, 'uploadFailed'));
         }
       })();
     });
@@ -1509,7 +1512,7 @@ export const MainPage = () => {
     // stay in sync (previously we set an invalid value "Create" which left
     // the Styles tab visually highlighted while showing creations content).
     setActiveMainTab('Creations');
-    toast.success(`Style "${previewFormat?.name}" selected`);
+    toast.success(t('styleSelected', { name: previewFormat?.name }));
   };
 
   // Swipe handlers for popups
@@ -1585,7 +1588,7 @@ export const MainPage = () => {
               data-testid="upgrade-btn"
             >
               <UpgradeIcon className="upgrade-btn-icon" />
-              Upgrade
+              {t('upgrade')}
             </button>
             
             <button 
@@ -1609,22 +1612,12 @@ export const MainPage = () => {
             <div className="create-center-section">
               {/* Heading */}
               <div className="create-heading-wrapper min-h-[72px] flex flex-col items-center justify-center mb-6">
-                {isListening ? (
-                  <div className="listening-eye-container flex flex-col items-center justify-center animate-eyes-appear">
-                    {/* Two pill eyes morphing & expanding */}
-                    <div className="listening-eyes flex items-center justify-center">
-                      <div className="listening-eye listening-eye-left" />
-                      <div className="listening-eye listening-eye-right" />
-                    </div>
-                    <h2 className="speak-now-title">Speak now</h2>
-                  </div>
-                ) : (
-                  <div className="create-heading">
-                    <h1 className="create-title">
-                      {t('readyToCreate')}
-                    </h1>
-                  </div>
-                )}
+                {/* The heading stays as is while the mic listens (no "Speak now" / eyes) */}
+                <div className="create-heading">
+                  <h1 className="create-title">
+                    {t('readyToCreate')}
+                  </h1>
+                </div>
               </div>
 
               {/* Input area */}
@@ -1654,7 +1647,7 @@ export const MainPage = () => {
                   <div className="input-inner relative">
                     {isListening && !prompt && (
                       <div className="listening-placeholder-overlay" onClick={() => textareaRef.current?.focus()}>
-                        <span>Listening</span>
+                        <span>{t('listening')}</span>
                         <span className="listening-wave-dots">
                           <span className="dot dot-1">.</span>
                           <span className="dot dot-2">.</span>
@@ -1697,7 +1690,7 @@ export const MainPage = () => {
                       <button
                         className="style-chip-close"
                         onClick={() => setSelectedFormat(null)}
-                        aria-label="Remove style"
+                        aria-label={t('removeStyle')}
                         data-testid="selected-style-chip-close"
                       >
                         <X className="w-4 h-4" strokeWidth={2.4} />
@@ -1710,7 +1703,7 @@ export const MainPage = () => {
                       className={`input-icon-btn ${isListening ? "mic-active" : ""}`} 
                       onClick={toggleListening} 
                       data-testid="mic-button"
-                      title={isListening ? "Stop listening" : "Start speaking"}
+                      title={isListening ? t('stopListening') : t('startSpeaking')}
                     >
                       <MicIcon className="w-5 h-5" />
                     </button>
@@ -1827,7 +1820,7 @@ export const MainPage = () => {
                                   className="modified-badge"
                                   data-testid={`modified-badge-${video.id}`}
                                 >
-                                  modified
+                                  {t('modifiedBadge')}
                                 </span>
                               )}
                               {video.aspect === '16:9' && (
@@ -1920,14 +1913,14 @@ export const MainPage = () => {
               setOpenMenu(null);
             }}>
               <Download className="w-4 h-4" />
-              <span>Download</span>
+              <span>{t('menuDownload')}</span>
             </button>
             <button onClick={(e) => { 
               e.stopPropagation(); 
               handleEdit(openMenu.id);
             }}>
               <Edit2 className="w-4 h-4" />
-              <span>Edit</span>
+              <span>{t('menuEdit')}</span>
             </button>
             <button onClick={(e) => { 
               e.stopPropagation(); 
@@ -1935,7 +1928,7 @@ export const MainPage = () => {
               setOpenMenu(null);
             }}>
               <Trash2 className="w-4 h-4" />
-              <span>Delete</span>
+              <span>{t('menuDelete')}</span>
             </button>
           </div>
         )}
@@ -1956,7 +1949,7 @@ export const MainPage = () => {
               }
               setSelectedFormat(committedFormat || previewFormat);
               setActiveMainTab('Creations');
-              toast.success(`Style "${(committedFormat || previewFormat)?.name}" selected`);
+              toast.success(t('styleSelected', { name: (committedFormat || previewFormat)?.name }));
             }}
           />
         )}
@@ -1973,7 +1966,7 @@ export const MainPage = () => {
             >
               <div className="popup-drag-handle" />
               
-              <h2 className="formats-list-title">Styles</h2>
+              <h2 className="formats-list-title">{t('formats')}</h2>
               
               <div className="formats-list-grid">
                 {FORMATS.map((format) => (

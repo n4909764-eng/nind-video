@@ -9967,14 +9967,13 @@ body {
 .topup-pack-icon { width: 17px; height: 17px; flex-shrink: 0; }
 
 /* ===================== Starter intro offer (t91) ===================== */
-.pricing-card-top.promo {
-  background: linear-gradient(180deg, #009BDA 0%, #008EC7 50%, #006EA3 100%);
-  border-color: rgba(255, 255, 255, 0.14);
+/* t101: Starter keeps the regular gray top; the intro price sits on a sharp white box */
+.pricing-card-top.promo .pricing-price-row { align-items: center; }
+.pricing-card-top.promo .pricing-price.promo-price {
+  background: #FFFFFF; color: #000000; border-radius: 0; padding: 0 8px; line-height: 1.15;
 }
-.pricing-card-top.promo .pricing-credits-box { background: rgba(255, 255, 255, 0.16); }
-.pricing-card-top.promo .pricing-period { color: rgba(255, 255, 255, 0.75); }
-.pricing-price-old { font-size: 20px; font-weight: 600; color: rgba(255, 255, 255, 0.6); text-decoration: line-through; margin-right: 2px; align-self: center; }
-.pricing-promo-note { font-size: 13px; line-height: 1.35; color: rgba(255, 255, 255, 0.85); margin-top: -12px; }
+.pricing-price-old { font-size: 20px; font-weight: 600; color: rgba(255, 255, 255, 0.45); text-decoration: line-through; margin-right: 2px; align-self: center; }
+.pricing-promo-note { font-size: 13px; line-height: 1.35; color: rgba(255, 255, 255, 0.6); margin-top: -12px; }
 
 /* ===================== Level picker: dots under labels + High lock (t91) ===================== */
 .level-labels { position: relative; display: block; height: 18px; margin: 0 13px 16px; }
@@ -9984,3 +9983,48 @@ body {
 }
 .level-label.locked { color: #6C6C70; }
 .level-lock { position: absolute; left: calc(100% + 3px); top: 50%; width: 11px; height: 11px; margin-top: -6px; }
+
+/* ===================== t101: mode window styled like the My creations "⋮" menu ===================== */
+.level-popover {
+  width: 264px; padding: 16px 18px 14px;
+  background: #0F0F10; border: 0.5px solid rgba(255, 255, 255, 0.1); border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  font-family: -apple-system, 'SF Pro Text', sans-serif;
+  opacity: 0; animation: menu-fade-in 0.1s ease-out forwards;
+}
+.level-popover .level-label {
+  font-family: -apple-system, 'SF Pro Text', sans-serif;
+  font-size: 14px; font-weight: 500; color: rgba(255, 255, 255, 0.55);
+  padding: 2px 6px; margin-top: -2px; border-radius: 8px; line-height: 18px;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.level-popover .level-label:hover { background: rgba(255, 255, 255, 0.1); color: #FFFFFF; }
+.level-popover .level-label.active { color: #FFFFFF; }
+.level-popover .level-label.locked { color: rgba(255, 255, 255, 0.35); }
+.level-popover .level-track { background: rgba(255, 255, 255, 0.12); }
+.level-popover .level-caption {
+  font-family: -apple-system, 'SF Pro Text', sans-serif;
+  font-size: 13px; font-weight: 500; color: rgba(255, 255, 255, 0.55); margin-top: 16px;
+}
+
+/* ===================== t101: signed-in composer is opaque from the first frame ===================== */
+/* The signed-in page used to fade the perspective grid in (0.3s delay + 1.2s, opacity + transform, masked).
+   On iOS Safari that animated, masked layer is composited above the not-yet-composited prompt box,
+   so the grid showed through the box until the animation ended. The grid is now static on the
+   signed-in page, and the prompt box gets its own compositing layer so it always paints on top. */
+.main-page-fixed .perspective-grid {
+  animation: none !important;
+  opacity: 1 !important;
+  transform: none;
+}
+@media (min-width: 1024px) {
+  .main-page-fixed .perspective-grid { transform: translateX(-50%); }
+}
+.main-page-fixed .create-input-area { position: relative; z-index: 10; }
+.main-page-fixed .input-outer,
+.video-edit-input-area .input-outer {
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
