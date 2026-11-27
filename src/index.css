@@ -10072,3 +10072,15 @@ body {
 }
 [data-theme="light"] .composer-grid svg line,
 [data-theme="light"] .composer-grid svg path { stroke: rgba(0, 0, 0, 0.07) !important; }
+
+/* t105: the edit-progress ring spun together with its percentage text; spin only the arc */
+.processing-ring { animation: none; border-top-color: rgba(255, 255, 255, 0.1); }
+.processing-ring::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 4px solid transparent;
+  border-top-color: #ffffff;
+  animation: spin 1s linear infinite;
+}
