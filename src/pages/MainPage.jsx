@@ -173,8 +173,8 @@ const FORMATS = [
 
 // Example videos for carousel — updated per user spec
 const EXAMPLE_VIDEOS = [
-  { id: 1, title: "Content Creation", subtitle: "Clips about stories, facts, events…", color: "#1F2937", video: "/assets/home/content-creation-paris.mp4", poster: "/assets/home/content-creation-paris.jpg" },
-  { id: 2, title: "Content Editing", subtitle: "Adding Subtitles, AI voice acting, Visual Effects, Frame Extraction, Graphics Elements…", color: "#1E293B", video: "/assets/home/content-editing-chernobyl.mp4", poster: "/assets/home/content-editing-chernobyl.jpg" },
+  { id: 1, title: "Content Creation", subtitle: "Clips about stories, facts, events…", color: "#1F2937", video: "/assets/home/content-creation-chernobyl.mp4", poster: "/assets/home/content-creation-chernobyl.jpg" },
+  { id: 2, title: "Content Editing", subtitle: "Adding Subtitles, AI voice acting, Visual Effects, Frame Extraction, Graphics Elements…", color: "#1E293B", video: "/assets/home/content-editing-venice-montage.mp4", poster: "/assets/home/content-editing-venice-montage.jpg" },
   { id: 3, title: "Product Promo", subtitle: "Promo video about your product", color: "#1E1B4B", video: "/assets/home/product-promo-duolingo.mp4", poster: "/assets/home/product-promo-duolingo.jpg" },
   { id: 4, title: "Video Translation", subtitle: "Translation using AI dubbing or subtitles", color: "#14532D", video: "/assets/home/video-translation-venice.mp4", poster: "/assets/home/video-translation-venice.jpg" },
 ];
