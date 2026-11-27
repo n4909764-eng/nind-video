@@ -178,6 +178,24 @@ const EXAMPLE_VIDEOS = [
   { id: 4, title: "Video Translation", subtitle: "Translation using AI dubbing or subtitles", color: "#14532D" },
 ];
 
+// Perspective grid lines behind the composer (same drawing on mobile and desktop)
+const ComposerGridSvg = () => (
+  <svg viewBox="0 0 400 300" preserveAspectRatio="none" className="grid-svg">
+      <line x1="0" y1="0" x2="0" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
+      <line x1="80" y1="0" x2="80" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
+      <line x1="160" y1="0" x2="160" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
+      <line x1="240" y1="0" x2="240" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
+      <line x1="320" y1="0" x2="320" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
+      <line x1="400" y1="0" x2="400" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
+      
+      <path d="M0,0 Q200,0 400,0" stroke="rgba(255,255,255,0.06)" strokeWidth="1" fill="none"/>
+      <path d="M0,75 Q200,65 400,75" stroke="rgba(255,255,255,0.07)" strokeWidth="1" fill="none"/>
+      <path d="M0,150 Q200,130 400,150" stroke="rgba(255,255,255,0.08)" strokeWidth="1" fill="none"/>
+      <path d="M0,225 Q200,195 400,225" stroke="rgba(255,255,255,0.09)" strokeWidth="1" fill="none"/>
+      <path d="M0,300 Q200,260 400,300" stroke="rgba(255,255,255,0.1)" strokeWidth="1" fill="none"/>
+    </svg>
+);
+
 // Smooth progress component
 const SmoothProgressCard = ({ video, onStop }) => {
   const [displayProgress, setDisplayProgress] = useState(0);
@@ -1559,20 +1577,7 @@ export const MainPage = () => {
       <div className="main-page-fixed" data-testid="main-page-logged">
         {/* Background Grid */}
         <div className="perspective-grid">
-          <svg viewBox="0 0 400 300" preserveAspectRatio="none" className="grid-svg">
-            <line x1="0" y1="0" x2="0" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
-            <line x1="80" y1="0" x2="80" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
-            <line x1="160" y1="0" x2="160" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
-            <line x1="240" y1="0" x2="240" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
-            <line x1="320" y1="0" x2="320" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
-            <line x1="400" y1="0" x2="400" y2="300" stroke="rgba(255,255,255,0.08)" strokeWidth="1"/>
-            
-            <path d="M0,0 Q200,0 400,0" stroke="rgba(255,255,255,0.06)" strokeWidth="1" fill="none"/>
-            <path d="M0,75 Q200,65 400,75" stroke="rgba(255,255,255,0.07)" strokeWidth="1" fill="none"/>
-            <path d="M0,150 Q200,130 400,150" stroke="rgba(255,255,255,0.08)" strokeWidth="1" fill="none"/>
-            <path d="M0,225 Q200,195 400,225" stroke="rgba(255,255,255,0.09)" strokeWidth="1" fill="none"/>
-            <path d="M0,300 Q200,260 400,300" stroke="rgba(255,255,255,0.1)" strokeWidth="1" fill="none"/>
-          </svg>
+          <ComposerGridSvg />
         </div>
         
         {/* Fixed Header */}
@@ -1622,6 +1627,8 @@ export const MainPage = () => {
 
               {/* Input area */}
               <div className="create-input-area">
+                {/* Desktop: grid anchored to the composer itself, so it sits right under it like on mobile */}
+                <div className="composer-grid" aria-hidden="true"><ComposerGridSvg /></div>
                 {(() => {
                   const anyUploading = attachments.some(a => a.uploading);
                   const sendDisabled = isGenerating || anyUploading || (!prompt.trim() && attachments.length === 0);
