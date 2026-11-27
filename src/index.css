@@ -10084,3 +10084,79 @@ body {
   border-top-color: #ffffff;
   animation: spin 1s linear infinite;
 }
+
+/* ===== t108: Explore nind ai showcase player ===== */
+.showcase-player {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 35px;
+  overflow: hidden;
+  background: #141414;
+  isolation: isolate;
+  transform: translateZ(0);
+}
+.showcase-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  opacity: 0;
+  transition: opacity .6s ease;
+  pointer-events: none;
+}
+.showcase-video.is-active { opacity: 1; }
+.showcase-mute {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  z-index: 3;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: rgba(30, 30, 30, .38);
+  border: 1px solid rgba(255, 255, 255, .22);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  backdrop-filter: blur(16px) saturate(160%);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .35), inset 0 1px 0 rgba(255, 255, 255, .15);
+  cursor: pointer;
+  transition: transform .15s ease, background .2s ease;
+}
+.showcase-mute:hover { background: rgba(60, 60, 60, .45); transform: scale(1.05); }
+.showcase-mute:active { transform: scale(.96); }
+.showcase-mute:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+.showcase-dots {
+  position: absolute;
+  left: 20px;
+  bottom: 26px;
+  z-index: 3;
+  display: flex;
+  gap: 6px;
+}
+.showcase-dot {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, .7);
+  background: rgba(30, 30, 30, .32);
+  border: 1px solid rgba(255, 255, 255, .16);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  cursor: pointer;
+  transition: color .2s ease, background .2s ease;
+}
+.showcase-dot.is-active { color: #000; background: rgba(255, 255, 255, .92); }
+@media (max-width: 767px) {
+  .showcase-player { border-radius: 22px; }
+  .showcase-mute { width: 40px; height: 40px; right: 12px; bottom: 12px; }
+  .showcase-mute svg { width: 18px; height: 18px; }
+  .showcase-dots { left: 12px; bottom: 16px; gap: 4px; }
+  .showcase-dot { height: 24px; padding: 0 9px; font-size: 11px; }
+}

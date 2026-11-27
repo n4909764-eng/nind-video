@@ -9,6 +9,7 @@ import UserAvatar from "../components/custom/UserAvatar";
 import StyleDetailPopup from "../components/custom/StyleDetailPopup";
 import LevelPicker, { loadLevel } from "../components/custom/LevelPicker";
 import AttachmentThumb from "../components/custom/AttachmentThumb";
+import ShowcasePlayer from "../components/custom/ShowcasePlayer";
 import { getTranslation, tr, getCurrentLang } from "../utils/translations";
 import { apiErrorMessage } from "../utils/apiMessages";
 
@@ -173,9 +174,9 @@ const FORMATS = [
 // Example videos for carousel — updated per user spec
 const EXAMPLE_VIDEOS = [
   { id: 1, title: "Content Creation", subtitle: "Clips about stories, facts, events…", color: "#1F2937", video: "/assets/home/content-creation-paris.mp4", poster: "/assets/home/content-creation-paris.jpg" },
-  { id: 2, title: "Content Editing", subtitle: "Adding Subtitles, AI voice acting, Visual Effects, Frame Extraction, Graphics Elements…", color: "#1E293B" },
+  { id: 2, title: "Content Editing", subtitle: "Adding Subtitles, AI voice acting, Visual Effects, Frame Extraction, Graphics Elements…", color: "#1E293B", video: "/assets/home/content-editing-chernobyl.mp4", poster: "/assets/home/content-editing-chernobyl.jpg" },
   { id: 3, title: "Product Promo", subtitle: "Promo video about your product", color: "#1E1B4B", video: "/assets/home/product-promo-duolingo.mp4", poster: "/assets/home/product-promo-duolingo.jpg" },
-  { id: 4, title: "Video Translation", subtitle: "Translation using AI dubbing or subtitles", color: "#14532D" },
+  { id: 4, title: "Video Translation", subtitle: "Translation using AI dubbing or subtitles", color: "#14532D", video: "/assets/home/video-translation-venice.mp4", poster: "/assets/home/video-translation-venice.jpg" },
 ];
 
 // Perspective grid lines behind the composer (same drawing on mobile and desktop)
@@ -2268,7 +2269,7 @@ export const MainPage = () => {
         <div className="how-section">
           <h2 className="section-title">Explore nind ai</h2>
           <div className="how-video-wrapper">
-            <div className="how-video-placeholder" />
+            <ShowcasePlayer />
           </div>
         </div>
 
