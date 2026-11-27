@@ -10144,3 +10144,33 @@ body {
   .showcase-toggle { width: 40px; height: 40px; right: 12px; bottom: 12px; }
   .showcase-toggle svg { width: 16px; height: 16px; }
 }
+
+/* ===== t110: example cards — compact on larger screens (like My creations) ===== */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .example-card { width: 42%; }
+}
+@media (min-width: 1024px) {
+  .examples-section-new {
+    max-width: 1180px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .examples-carousel-wrapper {
+    overflow: visible;
+    scroll-snap-type: none;
+  }
+  .examples-carousel-inner {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 16px;
+    padding: 10px 16px;
+  }
+  .examples-carousel-inner::after { display: none; }
+  .example-card { width: auto; }
+  .example-card-content { border-radius: 28px; }
+  .examples-and-more-text {
+    grid-column: 1 / -1;
+    padding: 10px 0 0;
+  }
+  .examples-nav-buttons-left { display: none; }
+}
